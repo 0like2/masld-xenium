@@ -1,0 +1,26 @@
+# Files for Git to ignore
+.DS_Store
+
+# Data
+**/data
+*.rds
+*.h5ad
+*.csv
+output/
+figures/
+dist/
+
+# Logs
+*.log
+*.log.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+*.egg-info/
+.env
+.venv
+env/
+venv/
