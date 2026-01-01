@@ -444,39 +444,72 @@ def visualize_step4_optimization(adata: sc.AnnData, output_dir: Path, sample_tag
         logger.error(f"Error visualizing Step 4: {e}")
 
 
-def visualize_segmentation_overlay(xenium_input: Path, output_dir: Path, sample_tag: str, roi_size_um: float = 200.0):
+
+def visualize_segmentation_overlay(xenium_input: Path, output_dir: Path, sample_tag: str, roi_size_um: float = 200.0, adata: sc.AnnData = None):
     """
     Visualizes actual cell segmentation shapes (boundaries) and transcripts in a specific ROI.
     Paper-Grade Visual (Image 5c style).
+    Supports Fallback to Transcripts + Centroids if boundaries are missing.
     """
     logger.info(f"Visualizing Segmentation Overlay (ROI {roi_size_um}µm) for {sample_tag}...")
     
-    try:
-        xenium_input = Path(xenium_input)
-        
-        # 1. Determine ROI center using transcripts summary or centroids if valid
-        # We can try reading a subsample of transcripts or just assume center of image?
-        # Better: use existing adata centroids if available, else read metadata.
-        # Im taking a shortcut: Use transcripts.parquet metadata or just read it (pandas is fast enough for header?)
-        # Let's assume we can read transcripts.parquet reasonably fast or use adata if passed.
-        # To keep signature simple, let's just peek at transcripts.parquet middle.
-        
+    xenium_input = Path(xenium_input) if xenium_input else None
+    
+    # Flags
+    has_boundaries = False
+    has_transcripts = False
+    
+    df_transcripts = None
+    df_bounds = None
+    
+    # 1. Try Loading from Raw Input
+    if xenium_input and xenium_input.exists():
+        # Check Transcripts
         transcripts_path = xenium_input / "transcripts.parquet"
         if not transcripts_path.exists():
-            transcripts_path = xenium_input / "transcripts.csv" # Fallback
-            if not transcripts_path.exists():
-                logger.warning(f"Transcripts file not found in {xenium_input}")
-                return
+             transcripts_path = xenium_input / "transcripts.csv"
+        
+        if transcripts_path.exists():
+             has_transcripts = True
+             if transcripts_path.suffix == '.parquet':
+                 df_transcripts = pd.read_parquet(transcripts_path, columns=['x_location', 'y_location'])
+             else:
+                 df_transcripts = pd.read_csv(transcripts_path, usecols=['x_location', 'y_location'])
 
-        # Load specific columns to find bounds
-        # pd.read_parquet supports columns.
-        if transcripts_path.suffix == '.parquet':
-            df_loc = pd.read_parquet(transcripts_path, columns=['x_location', 'y_location'])
-        else:
-            df_loc = pd.read_csv(transcripts_path, usecols=['x_location', 'y_location'])
+        # Check Boundaries
+        bounds_file = xenium_input / "cell_boundaries.parquet"
+        bounds_type = "Cell"
+        if not bounds_file.exists():
+            bounds_file = xenium_input / "nucleus_boundaries.parquet"
+            bounds_type = "Nucleus"
+        
+        if bounds_file.exists():
+            has_boundaries = True
+            df_bounds = pd.read_parquet(bounds_file)
+
+    # 2. Fallback to AnnData if Raw Missing
+    if not has_boundaries or not has_transcripts:
+        if adata is not None:
+            logger.info("Raw files missing or incomplete. Using AnnData for Fallback Overlay.")
             
-        x_min, x_max = df_loc['x_location'].min(), df_loc['x_location'].max()
-        y_min, y_max = df_loc['y_location'].min(), df_loc['y_location'].max()
+            # Transcripts from adata.uns
+            if 'spots' in adata.uns:
+                has_transcripts = True
+                # spots df usually has x_location, y_location
+                df_transcripts = adata.uns['spots'][['x_location', 'y_location']].copy()
+            
+            # For boundaries, we don't have polygons, but we have Centroids
+            # We will use Centroids as a proxy for 'Cell' location
+            has_boundaries = False # Still false, but we have centers
+            
+    if not has_transcripts:
+        logger.warning("No transcript data found (Raw or AnnData). Cannot plot overlay.")
+        return
+
+    try:
+        # 3. Determine ROI Center
+        x_min, x_max = df_transcripts['x_location'].min(), df_transcripts['x_location'].max()
+        y_min, y_max = df_transcripts['y_location'].min(), df_transcripts['y_location'].max()
         
         x_center = (x_min + x_max) / 2
         y_center = (y_min + y_max) / 2
@@ -487,63 +520,57 @@ def visualize_segmentation_overlay(xenium_input: Path, output_dir: Path, sample_
         roi_y_min = y_center - (roi_size_um / 2)
         roi_y_max = y_center + (roi_size_um / 2)
         
-        logger.info(f"ROI Center: ({x_center:.1f}, {y_center:.1f}), Size: {roi_size_um}µm")
-        
-        # 2. Load Data in ROI
-        # Transcripts
-        df_transcripts = df_loc[
-            (df_loc['x_location'] >= roi_x_min) & (df_loc['x_location'] <= roi_x_max) &
-            (df_loc['y_location'] >= roi_y_min) & (df_loc['y_location'] <= roi_y_max)
-        ]
-        
-        # Boundaries
-        # Try 'cell_boundaries.parquet' (newer) or 'nucleus_boundaries.parquet'
-        bounds_file = xenium_input / "cell_boundaries.parquet"
-        bounds_type = "Cell"
-        if not bounds_file.exists():
-            bounds_file = xenium_input / "nucleus_boundaries.parquet"
-            bounds_type = "Nucleus"
-            if not bounds_file.exists():
-                logger.warning("No boundary file (cell/nucleus) found.")
-                return 
+        logger.info(f"ROI Center: ({x_center:.1f}, {y_center:.1f})")
 
-        df_bounds = pd.read_parquet(bounds_file)
-        # vertex_x, vertex_y
-        df_bounds = df_bounds[
-            (df_bounds['vertex_x'] >= roi_x_min) & (df_bounds['vertex_x'] <= roi_x_max) &
-            (df_bounds['vertex_y'] >= roi_y_min) & (df_bounds['vertex_y'] <= roi_y_max)
+        # 4. Filter Transcripts in ROI
+        df_transcripts_roi = df_transcripts[
+            (df_transcripts['x_location'] >= roi_x_min) & (df_transcripts['x_location'] <= roi_x_max) &
+            (df_transcripts['y_location'] >= roi_y_min) & (df_transcripts['y_location'] <= roi_y_max)
         ]
         
-        # 3. Plot
+        # 5. Plotting
         fig, ax = plt.subplots(figsize=(10, 10))
         
-        # Plot Transcripts (Dots)
-        ax.scatter(df_transcripts['x_location'], df_transcripts['y_location'], 
+        # Scatter Transcripts
+        ax.scatter(df_transcripts_roi['x_location'], df_transcripts_roi['y_location'], 
                    s=1, c='gray', alpha=0.5, label='Transcripts')
         
-        # Plot Boundaries (Polygons)
-        # Group by cell_id
-        from matplotlib.patches import Polygon
-        from matplotlib.collections import PatchCollection
-        import numpy as np
-
-        patches = []
-        # Optimizing: only plot cells that have vertices in ROI
-        # (Already filtered df_bounds)
+        # Plot Boundaries OR Centroids
+        if has_boundaries and df_bounds is not None:
+             # Filter Bounds
+             df_bounds_roi = df_bounds[
+                (df_bounds['vertex_x'] >= roi_x_min) & (df_bounds['vertex_x'] <= roi_x_max) &
+                (df_bounds['vertex_y'] >= roi_y_min) & (df_bounds['vertex_y'] <= roi_y_max)
+             ]
+             
+             from matplotlib.patches import Polygon
+             from matplotlib.collections import PatchCollection
+             patches = []
+             for cell_id, grp in df_bounds_roi.groupby('cell_id'):
+                 if len(grp) < 3: continue
+                 poly = Polygon(grp[['vertex_x', 'vertex_y']].values, closed=True)
+                 patches.append(poly)
+             p = PatchCollection(patches, alpha=0.4, edgecolor='orange', facecolor='none', linewidth=1.5, label=f'{bounds_type} Boundaries')
+             ax.add_collection(p)
+             
+        elif adata is not None:
+             # Plot Centroids from adata.obs
+             # Check for x_centroid, y_centroid
+             if 'x_centroid' in adata.obs and 'y_centroid' in adata.obs:
+                 centroids = adata.obs[['x_centroid', 'y_centroid']]
+                 centroids_roi = centroids[
+                    (centroids['x_centroid'] >= roi_x_min) & (centroids['x_centroid'] <= roi_x_max) &
+                    (centroids['y_centroid'] >= roi_y_min) & (centroids['y_centroid'] <= roi_y_max)
+                 ]
+                 ax.scatter(centroids_roi['x_centroid'], centroids_roi['y_centroid'], 
+                            s=20, c='red', marker='x', label='Cell Centroids')
+                 logger.info("Plotting Cell Centroids (Boundaries Missing)")
         
-        for cell_id, grp in df_bounds.groupby('cell_id'):
-            if len(grp) < 3: continue
-            poly = Polygon(grp[['vertex_x', 'vertex_y']].values, closed=True)
-            patches.append(poly)
-            
-        p = PatchCollection(patches, alpha=0.4, edgecolor='orange', facecolor='none', linewidth=1.5, label=f'{bounds_type} Boundaries')
-        ax.add_collection(p)
-        
-        # Refine View
         ax.set_xlim(roi_x_min, roi_x_max)
         ax.set_ylim(roi_y_min, roi_y_max)
         ax.set_aspect('equal')
-        ax.set_title(f"Segmentation Overlay (ROI Center) - {sample_tag}\n{bounds_type} Boundaries + Transcripts")
+        title_extra = "(Centroids Only)" if not has_boundaries else f"({bounds_type} Boundaries)"
+        ax.set_title(f"Segmentation Overlay (ROI) - {sample_tag}\n{title_extra}")
         ax.legend(loc='upper right')
         
         output_plot = output_dir / f"{sample_tag}_segmentation_overlay_roi.png"
@@ -553,6 +580,7 @@ def visualize_segmentation_overlay(xenium_input: Path, output_dir: Path, sample_
 
     except Exception as e:
         logger.error(f"Error visualizing segmentation overlay: {e}")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Visualize Xenium Pipeline Results")
@@ -668,3 +696,84 @@ def visualize_step8_svf(adata: sc.AnnData, output_dir: Path, sample_tag: str):
             print("Warning: SVF results missing 'qval' column.")
     except Exception as e:
         print(f"Error generating Step 8 SVF maps: {e}")
+
+def visualize_marker_genes_violin(adata: sc.AnnData, output_dir: Path, sample_tag: str):
+    """Visualizes marker gene expression distribution (Violin Plot) - Image 3e style."""
+    logger.info(f"Visualizing Marker Gene Violin Plots for {sample_tag}...")
+
+    try:
+        # Determine Cluster Key
+        cluster_key = 'leiden'
+        if 'leiden' not in adata.obs:
+            # Fallback search
+            candidates = [c for c in adata.obs.columns if 'leiden' in c or 'louvain' in c or 'cluster' in c]
+            if candidates:
+                cluster_key = candidates[0]
+                logger.info(f"Using fallback cluster key: {cluster_key}")
+            else:
+                logger.warning("No cluster key found (leiden/louvain). Skipping Violin Plot.")
+                return
+
+        # Check if rank_genes_groups has been run
+        # Note: If reusing existing rank_genes_groups, ensure it used the SAME key.
+        # Safest is to re-run or check params. For now, we re-run to be safe.
+        logger.info(f"Computing rank_genes_groups for marker selection (groupby={cluster_key})...")
+        sc.tl.rank_genes_groups(adata, groupby=cluster_key, method='wilcoxon')
+        
+        # Extract top markers
+        markers = []
+        n_clusters = adata.obs[cluster_key].nunique()
+        for i in range(n_clusters):
+            # Get top 2 genes for this cluster
+            # Handle structured array access carefully
+            try:
+                # Try accessing assuming cluster names map to indices or are sorted
+                # But rank_genes_groups uses cluster categories as names.
+                # Let's use the 'names' structured array directly.
+                names_struct = adata.uns['rank_genes_groups']['names']
+                
+                # Check if we can access by field name (cluster name)
+                categories = adata.obs[cluster_key].cat.categories
+                cluster_name = str(categories[i])
+                
+                if cluster_name in names_struct.dtype.names:
+                     cluster_genes = names_struct[cluster_name][:2]
+                else:
+                     # Fallback to positional index if names don't match or strictly integer
+                     cluster_genes = [names_struct[j][i] for j in range(2)]
+                
+                markers.extend(cluster_genes)
+            except Exception as e:
+                logger.warning(f"Could not extract markers for cluster {i}: {e}")
+                continue
+        
+        # Deduplicate while preserving order
+        markers = list(dict.fromkeys(markers))
+        
+        # Plot Stacked Violin
+        logger.info(f"Top markers selected: {len(markers)} genes")
+        
+        # Filter markers to those in var_names
+        valid_markers = [g for g in markers if g in adata.var_names]
+        
+        if not valid_markers:
+            logger.warning("No valid marker genes found to plot.")
+            return
+
+        ax = sc.pl.stacked_violin(
+            adata, 
+            valid_markers, 
+            groupby=cluster_key, 
+            swap_axes=False,
+            show=False,
+            title=f"Marker Gene Expression ({sample_tag})",
+            cmap='viridis_r'
+        )
+        
+        output_plot = output_dir / f"{sample_tag}_marker_genes_violin.png"
+        plt.savefig(output_plot, dpi=300, bbox_inches='tight')
+        plt.close()
+        logger.info(f"✓ Saved Marker Gene Violin Plot: {output_plot}")
+
+    except Exception as e:
+        logger.error(f"Error producing violin plot: {e}")
