@@ -31,12 +31,16 @@ def run_from_config(config_path):
         'preprocess_kwargs': config.get('preprocess_kwargs', {})
     }
 
+    # Step 5: Raw Image Path
+    raw_image = config.get('raw_image_path', None)
+
     try:
         pipeline = XeniumPipeline(
             xenium_input_path=input_path,
             output_path=output_dir,
             sample_tag=sample_tag,
-            load_preprocessed=True # Default behavior
+            load_preprocessed=True, # Default behavior
+            raw_image_path=raw_image
         )
         
         pipeline.run_full_pipeline(steps=steps, **pipeline_kwargs)

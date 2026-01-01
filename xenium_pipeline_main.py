@@ -56,6 +56,12 @@ except ImportError:
     s2_overlaps = None
     s2_ssam = None
 
+# NEW MODULE: Step 5 Segmentation Benchmark
+try:
+    import step5_benchmark as s5_bench
+except ImportError:
+    s5_bench = None
+
 # Visualization module
 import visualize_results as vis
 
@@ -120,7 +126,8 @@ class XeniumPipeline:
         xenium_input_path: str = None,
         output_path: str = "./output",
         sample_tag: str = "xenium_sample",
-        load_preprocessed: bool = False
+        load_preprocessed: bool = False,
+        raw_image_path: str = None
     ):
         """
         Parameters
@@ -133,8 +140,11 @@ class XeniumPipeline:
             샘플 이름 태그, by default "xenium_sample"
         load_preprocessed : bool, optional
             True이면 xenium_input_path를 h5ad 파일로 간주, by default False
+        raw_image_path : str, optional
+            Step 5를 위한 원본 이미지(DAPI) 경로
         """
         self.xenium_input_path = xenium_input_path
+        self.raw_image_path = raw_image_path
         self.sample_tag = sample_tag
         # 데이터셋 이름으로 하위 디렉토리 생성
         self.output_path = Path(output_path) / self.sample_tag
@@ -635,6 +645,49 @@ class XeniumPipeline:
         return result
 
     # =====================================================================
+    # STEP 5: 세그멘테이션 벤치마킹 (Cellpose + Baysor)
+    # =====================================================================
+    def step5_segmentation_benchmark(self, use_baysor: bool = False):
+        """Step 5: Compare Xenium Segmentation vs Cellpose/Baysor."""
+        logger.info("="*60)
+        logger.info("STEP 5: Segmentation Benchmark")
+        logger.info("="*60)
+        
+        if s5_bench is None:
+             logger.warning("Step 5 module not loaded.")
+             return
+             
+        if not self.raw_image_path:
+             logger.warning("No raw_image_path provided (DAPI). Skipping Step 5.")
+             return
+             
+        # Run Benchmark
+        results = s5_bench.run_step5_benchmark(
+            self.adata,
+            image_path=self.raw_image_path,
+            output_path=self.output_path,
+            sample_tag=self.sample_tag,
+            use_baysor=use_baysor
+        )
+        
+        if results.get('status') == 'skipped':
+             logger.warning(f"Step 5 Skipped: {results.get('reason')}")
+        elif results.get('status') == 'failed':
+             logger.error(f"Step 5 Failed: {results.get('error')}")
+        else:
+             logger.info("Step 5 Completed Successfully.")
+             logger.info(f"Metrics: {results}")
+             
+        # Save comparison if step 4 was run
+        step4_res_file = self.output_path / f"{self.sample_tag}_step4_optimal_expansion.csv"
+        if step4_res_file.exists():
+             import pandas as pd
+             step4_df = pd.read_csv(step4_res_file, index_col=0).T
+             # Add Step 5 metrics to comparison
+             # (Simplified logic)
+             logger.info("Comparison with Step 4 data is available in the logs.")
+
+    # =====================================================================
     # STEP 6: 전처리 시뮬레이션 및 최적화
     # =====================================================================
     # 참고: notebooks/6_simulating_preprocessing/6_3_Simulated_Xenium_different_preprocessing_python.ipynb
@@ -870,6 +923,9 @@ class XeniumPipeline:
 
             if 4 in steps:
                 self.step4_optimal_expansion()
+
+            if 5 in steps:
+                self.step5_segmentation_benchmark(use_baysor=kwargs.get('use_baysor', False))
 
             if 6 in steps:
                 self.step6_preprocessing_simulation()

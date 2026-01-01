@@ -777,3 +777,49 @@ def visualize_marker_genes_violin(adata: sc.AnnData, output_dir: Path, sample_ta
 
     except Exception as e:
         logger.error(f"Error producing violin plot: {e}")
+
+def visualize_gt_comparison(adata: sc.AnnData, output_dir: Path, sample_tag: str):
+    """
+    Visualizes Ground Truth (Step 0) vs. Clustering Results (Step 1) side-by-side on UMAP.
+    Paper-Grad Comparison.
+    """
+    logger.info(f"Visualizing Ground Truth Comparison for {sample_tag}...")
+
+    # Check Requirements
+    if 'ground_truth_celltype' not in adata.obs:
+        logger.warning("Ground Truth labels not found. Skipping Comparison visual.")
+        return
+        
+    cluster_key = None
+    if 'leiden_1_4' in adata.obs:
+         cluster_key = 'leiden_1_4'
+    elif 'leiden' in adata.obs:
+         cluster_key = 'leiden'
+         
+    if not cluster_key:
+         logger.warning("Clustering results not found. Skipping Comparison visual.")
+         return
+
+    try:
+        if 'X_umap' not in adata.obsm:
+             sc.pp.neighbors(adata)
+             sc.tl.umap(adata)
+             
+        # Plot Side-by-Side UMAP
+        fig, axs = plt.subplots(1, 2, figsize=(18, 8))
+        
+        # 1. Pipeline Result (Leiden)
+        sc.pl.umap(adata, color=cluster_key, ax=axs[0], show=False, title=f"Pipeline Result ({cluster_key})", legend_loc='on data', legend_fontsize=8)
+        
+        # 2. Ground Truth (Ref)
+        sc.pl.umap(adata, color='ground_truth_celltype', ax=axs[1], show=False, title="Ground Truth (Reference)", legend_loc='right margin')
+        
+        plt.tight_layout()
+        save_path = output_dir / f"{sample_tag}_comparison_gt_vs_pipeline.png"
+        plt.savefig(save_path, dpi=300)
+        plt.close()
+        
+        logger.info(f"✓ Saved GT Comparison Plot: {save_path}")
+        
+    except Exception as e:
+        logger.error(f"Error comparing GT vs Pipeline: {e}")
