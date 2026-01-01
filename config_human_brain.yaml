@@ -1,0 +1,26 @@
+
+# Data Paths
+input_anndata_path: "./data/unprocessed_adata/human_brain.h5ad"
+output_dir: "./output"
+sample_tag: "human_brain"
+
+# Pipeline Steps
+pipeline_steps: [0, 1, 2, 4, 6, 7, 8]
+
+# Tissue Type (for GT)
+tissue_type: "brain"
+
+# Kwargs
+preprocess_kwargs:
+  target_sum: 100
+  mincounts: 10
+  mingenes: 3
+  neigh: 15
+  scale: False
+  hvg: False
+  # Visualization Settings
+  genes_to_plot: ["Gfap", "Olig2", "Slc17a7", "Gad1", "Gad2"] # Example brain genes
+
+simulation_kwargs:
+  n_simulations: 618 # Default from notebook
+  sample_size: 0.05

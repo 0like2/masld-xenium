@@ -99,6 +99,15 @@ step_parameters:
     # - 0.02: 2% 샘플 (빠름, 5분)
     sample_size: 0.05
 
+  # Step 7: Ground Truth 생성 (Step 0에서 실행됨)
+  step7:
+    # 활성화 여부
+    enabled: False
+    # 조직 유형 (brain, breast 등)
+    tissue_type: "brain"
+    # 다운로드 경로
+    download_dir: "data/reference"
+
 
 # ============================================================================
 # 5️⃣ 로깅 및 출력 설정

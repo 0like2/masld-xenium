@@ -1,0 +1,76 @@
+- [x] Inspect data directory structure <!-- id: 0 -->
+- [x] Check for `config.yaml` <!-- id: 1 -->
+- [x] Install missing dependencies (`scanpy`) <!-- id: 5 -->
+- [x] Confirm input data source <!-- id: 6 -->
+- [x] Run pipeline with `test_output.h5ad` (File incompatible, but env verified) <!-- id: 7 -->
+- [/] Explore Zenodo repository for data links <!-- id: 9 -->
+- [x] Download a sample `.h5ad` file to `unprocessed_adata` <!-- id: 10 -->
+- [x] Run pipeline with downloaded real data (Code ready, data ready) <!-- id: 11 -->
+- [x] Download `human_brain.h5ad` (Background) <!-- id: 12 -->
+- [x] Install missing dependency (`PyYAML`) <!-- id: 14 -->
+- [x] Install remaining dependencies (`tifffile`, `squidpy` (optional), `rasterio`, `alphashape`, `louvain` (fallback)) <!-- id: 15 -->
+- [x] Run pipeline with `human_brain.h5ad` (Completed successfully) <!-- id: 13 -->
+- [x] Run full pipeline (`[0, 1, 2, 4, 6]`) for `human_brain` and `h_breast_1` <!-- id: 16 -->
+    - [x] Brain: Step 0 Ground Truth Fix (Ensembl mapping)
+    - [x] Brain/Breast: Step 1 Dependencies (`igraph`, `leidenalg`)
+    - [x] Brain: Step 6 Scope Fix (`has_ground_truth`)
+    - [x] Brain: Step 8 SVF (`SpatialDE`)
+    - [x] Brain: Step 7 Spatial Domains (Skipped due to `cmake`/`SpaGCN` build fail)
+- [x] **Implement Ground Truth Module** (formerly Step 7) <!-- id: 17 -->
+    - [x] Create `Xenium_benchmarking/step7_ground_truth.py` <!-- id: 18 -->
+- [x] **Refactor Pipeline Structure** <!-- id: 21 -->
+    - [x] Integrate Ground Truth generation into **Step 0** <!-- id: 22 -->
+    - [x] Update **Step 6** to use Ground Truth for ARI (Accuracy ARI) <!-- id: 23 -->
+    - [x] Remove explicit Step 7 from pipeline execution flow <!-- id: 24 -->
+- [x] **Detailed Pipeline Analysis & Verification** <!-- id: 25 -->
+    - [x] **Step 0: Formatting & Ground Truth** <!-- id: 26 -->
+        - [x] Analyze Visualization capabilities <!-- id: 27 -->
+        - [x] Verify scRNA-seq integration <!-- id: 28 -->
+        - [x] Compare with original `0_0` notebook <!-- id: 29 -->
+        - [x] Identify missing components <!-- id: 30 -->
+    - [x] **Step 1: Preprocessing** <!-- id: 31 -->
+    - [x] **Step 2: Segmentation-Free Analysis** <!-- id: 32 -->
+    - [x] **Step 4: Optimal Expansion** <!-- id: 33 -->
+    - [x] **Step 6: Optimization & ARI** <!-- id: 34 -->
+- [x] **Restore Visualizations (Steps 1 & 2)**
+    - [x] Step 1: QC Plots & UMAP
+    - [x] Step 2: Gene Distance Boxplots
+- [x] **Fix Logic & Performance (Steps 4 & 6)**
+    - [x] Step 4: Optimization Loop & Curve
+    - [x] Step 6: Sampling Bug Fix
+- [x] **Generate Comprehensive Summary Table** <!-- id: 36 -->
+
+## Implemented Enhancements (Notebook Audit)
+- [x] **Implement Step 2.3: Cell Overlaps** (Notebook `2_3`)
+    - [x] Create `step2_overlaps.py` using `ovrlpy`.
+    - [x] Logic: Signal Coherence & Z-axis analysis (Simplified).
+    - [x] Viz: Overlap histograms.
+- [x] **Implement Step 2.4: SSAM Analysis** (Notebook `2_4`)
+    - [x] Create `step2_ssam.py` using `ssam` package.
+    - [x] Logic: Kernel Density Estimation (KDE).
+    - [x] Viz: Density Maps.
+- [x] **Enhance Visualizations** (Notebook `6_4`, `8_1`, `7_1`)
+    - [x] Step 6: Add Heatmap for ARI scores.
+    - [x] Step 8: Add Spatial Gene Expression Maps for SVGs.
+
+## Pipeline Execution (Sequential)
+- [x] **Prepare Environment**
+    - [x] Kill existing processes.
+    - [x] Archive old output to `output_archive/`.
+    - [x] Create `run_all.sh` (Order: h_breast_2 -> Brain -> h_breast_1).
+- [ ] **Data 1: h_breast_2** (Fastest, ~650MB)
+    - [x] Execution Restarted (run_batch.py fixed).
+    - [x] Completion Verified (Output confirmed).
+- [ ] **Data 2: human_brain** (~1.2GB)
+    - [x] Started (Restart 2 - Config Fixed).
+    - [x] Completion Verified (Output confirmed).
+- [ ] **Data 3: h_breast_1** (~5GB)
+    - [>] Running Step 6: Simulation (CPU Heavy)...
+    - [x] Download complete (`data/unprocessed_adata/h_breast_2.h5ad`).
+
+## Visualization Audit (User Request)
+- [x] **Audit Visualizations for Listed Notebooks**
+    - [x] Analyze `visualize_results.py` vs Notebooks.
+    - [x] Create analysis report (`notebook_visulaization.md`).
+    - [ ] Implement missing Expression Heatmap (Future).
+

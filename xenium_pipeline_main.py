@@ -30,6 +30,35 @@ import xb.preprocessing as xp
 from xb.simulating import allcombs, allcombs_simulated
 from xb.calculating import dispersion, dist_nuc, compute_vi, compute_fmi
 
+# Ground Truth Tool Import (formerly Step 7)
+try:
+    import step7_ground_truth as s7
+except ImportError:
+    # logger.warning("step7_ground_truth 모듈을 찾을 수 없습니다. Ground Truth 생성 기능을 사용할 수 없습니다.")
+    s7 = None
+
+# NEW MODULES: Step 7 & 8
+try:
+    import step7_spatial_domains as s7_domains
+except ImportError:
+    s7_domains = None
+
+try:
+    import step8_svf as s8_svf
+except ImportError:
+    s8_svf = None
+
+# NEW MODULES: Step 2 Extensions (Overlaps & SSAM)
+try:
+    import step2_overlaps as s2_overlaps
+    import step2_ssam as s2_ssam
+except ImportError:
+    s2_overlaps = None
+    s2_ssam = None
+
+# Visualization module
+import visualize_results as vis
+
 
 # =====================================================================
 # 설정 로더
@@ -128,9 +157,17 @@ class XeniumPipeline:
     # 참고: notebooks/0_formatting/0_0_Formatting xenium to anndata.ipynb
     # 함수: format_xenium_adata_mid_2023() (2024년 Xenium 포맷)
 
-    def step0_format_xenium(self) -> sc.AnnData:
+    def step0_format_xenium(
+        self,
+        generate_ground_truth: bool = False,
+        tissue_type: str = "brain",
+        download_dir: str = "data/reference",
+        organ: Optional[str] = None
+    ) -> sc.AnnData:
         """
         Step 0: Xenium 원본 데이터를 AnnData 형식으로 변환
+        
+        Optional: Ground Truth 데이터 생성 (Reference Download & Label Transfer)
 
         입력: Xenium 장비 출력 (transcripts.csv, matrix.mtx 등)
         출력: AnnData 객체 및 H5AD 파일
@@ -141,34 +178,80 @@ class XeniumPipeline:
             포맷팅된 AnnData 객체
         """
         logger.info("="*60)
-        logger.info("STEP 0: 데이터 포맷팅 (Xenium to AnnData)")
+        logger.info("STEP 0: 데이터 포맷팅 & Ground Truth 준비")
         logger.info("="*60)
 
-        # 이미 전처리된 데이터가 로드된 경우 스킵
-        if self.load_preprocessed and self.adata is not None:
-            logger.info("✓ Preprocessed data loaded. Skipping Step 0.")
-            return self.adata
+        # 1. 데이터 포맷팅 / 로딩
+        # 1. 데이터 포맷팅 / 로딩
+        if self.adata is None:
+            # Check if input is already H5AD
+            if str(self.xenium_input_path).endswith('.h5ad'):
+                 logger.info(f"H5AD 파일 직접 로드 중: {self.xenium_input_path}")
+                 try:
+                     self.adata = sc.read_h5ad(self.xenium_input_path)
+                     logger.info(f"✓ 로드 완료: {self.adata.shape}")
+                 except Exception as e:
+                     logger.error(f"H5AD 로드 실패: {e}")
+                     raise
+            else:
+                # Raw data formatting
+                try:
+                    self.adata = xf.format_xenium_adata_mid_2023(
+                        path=self.xenium_input_path,
+                        tag=self.sample_tag,
+                        output_path=str(self.output_path)
+                    )
+                    logger.info(f"✓ 포맷팅 완료: {self.adata.shape}")
+                    logger.info(f"  - 세포 수: {self.adata.shape[0]}")
+                    logger.info(f"  - 유전자 수: {self.adata.shape[1]}")
 
-        # 현재 Xenium 포맷 (2024, mid)을 사용합니다.
-        # 2022 또는 2023 초 포맷인 경우 format_xenium_adata() 또는 format_xenium_adata_2023() 사용
-        try:
-            self.adata = xf.format_xenium_adata_mid_2023(
-                path=self.xenium_input_path,
-                tag=self.sample_tag,
-                output_path=str(self.output_path)
-            )
-            logger.info(f"✓ 포맷팅 완료: {self.adata.shape}")
-            logger.info(f"  - 세포 수: {self.adata.shape[0]}")
-            logger.info(f"  - 유전자 수: {self.adata.shape[1]}")
+                    # 배경 이미지 추출
+                    xf.format_background(self.xenium_input_path)
+                except Exception as e:
+                    logger.error(f"포맷팅 실패: {e}")
+                    raise
+        else:
+            logger.info(f"✓ Preprocessed/Loaded data found: {self.adata.shape}")
 
-            # 배경 이미지 추출
-            xf.format_background(self.xenium_input_path)
+        # 2. Ground Truth 생성 로직
+        if generate_ground_truth:
+            if s7 is None:
+                logger.warning("step7_ground_truth 모듈 부재로 Ground Truth 생성을 건너뜁니다.")
+            elif 'ground_truth_celltype' in self.adata.obs:
+                 logger.info("✓ Ground Truth already exists. Skipping generation.")
+            else:
+                logger.info("\n[0-1] Ground Truth 데이터 생성 시작...")
+                try:
+                    # 1. Reference Data
+                    logger.info(f"  - 레퍼런스 데이터 준비 ({tissue_type})...")
+                    adata_ref = s7.download_reference_data(
+                        tissue_type=tissue_type,
+                        download_dir=download_dir,
+                        organ=organ
+                    )
+                    
+                    # 2. Label Transfer
+                    logger.info("  - 라벨 전이 (Label Transfer)...")
+                    # s7.transfer_labels는 adata를 리턴하고 내부적으로 obs에 라벨 추가
+                    self.adata = s7.transfer_labels(self.adata, adata_ref, label_key='cell_type')
+                    
+                    # 컬럼 이름 확인 및 저장
+                    if 'cell_type' in self.adata.obs:
+                        self.adata.obs['ground_truth_celltype'] = self.adata.obs['cell_type']
+                        logger.info(f"  ✓ Ground Truth 라벨 생성 완료: {len(self.adata.obs['ground_truth_celltype'].unique())} cell types")
+                    else:
+                        logger.warning("  ⚠ 라벨 전이 후 'cell_type' 컬럼을 찾을 수 없습니다.")
 
-            return self.adata
+                    # 업데이트된 데이터 저장
+                    # output_file_labeled = self.output_path / f"{self.sample_tag}_step0_labeled.h5ad"
+                    # self.adata.write(str(output_file_labeled))
+                    # logger.info(f"  ✓ 라벨링된 데이터 저장: {output_file_labeled}")
 
-        except Exception as e:
-            logger.error(f"포맷팅 실패: {e}")
-            raise
+                except Exception as e:
+                    logger.error(f"Ground Truth 생성 중 오류: {e}")
+                    # 실패하더라도 파이프라인 중단하지 않음 (선택사항이므로)
+
+        return self.adata
 
     # =====================================================================
     # STEP 1: 데이터셋 탐색 및 전처리
@@ -184,7 +267,8 @@ class XeniumPipeline:
         neigh: int = 15,
         scale: bool = False,
         hvg: bool = False,
-        save: bool = True
+        save: bool = True,
+        **kwargs
     ) -> sc.AnnData:
         """
         Step 1: 데이터 품질 검증 및 전처리
@@ -276,6 +360,26 @@ class XeniumPipeline:
             output_file = self.output_path / f"{self.sample_tag}_step1_preprocessed.h5ad"
             self.adata.write(str(output_file))
             logger.info(f"✓ 저장: {output_file}")
+            
+            # 4. 시각화 (Enhanced)
+            logger.info("  - 시각화 생성 중 (QC, UMAP, Marker Genes)...")
+            vis.visualize_step1_qc(self.adata, self.output_path, self.sample_tag)
+            vis.visualize_pca_and_clustering(self.adata, self.output_path, self.sample_tag)
+            vis.visualize_spatial_clusters(self.adata, self.output_path, self.sample_tag)
+            
+            # High Priority: Marker Genes
+            vis.visualize_marker_genes(self.adata, self.output_path, self.sample_tag)
+            
+            # Medium Priority: Custom Genes
+            genes_to_plot = kwargs.get('genes_to_plot', [])
+            if genes_to_plot:
+                vis.visualize_specific_genes(self.adata, self.output_path, self.sample_tag, genes_to_plot)
+
+            # High Priority: Segmentation Overlay (Paper Image 5c)
+            # Requires xenium_input_path to find boundaries
+            if self.xenium_input_path:
+                 vis.visualize_segmentation_overlay(self.xenium_input_path, self.output_path, self.sample_tag)
+
 
         return self.adata
 
@@ -336,6 +440,11 @@ class XeniumPipeline:
         )
         reads_sample = reads_assigned.iloc[sample_indices]
 
+        # Save raw sampled reads for distribution visualization (Step 2)
+        raw_reads_path = self.output_path / f"{self.sample_tag}_step2_reads_sample.parquet"
+        reads_sample.to_parquet(raw_reads_path)
+        logger.info(f"✓ Saved raw sampled reads: {raw_reads_path}")
+
         # 4. 유전자별 거리 분석
         logger.info("\n[2-2] 유전자별 거리 분석...")
         gene_distances = reads_sample.groupby('feature_name')['distance'].agg(['mean', 'median', 'std', 'count'])
@@ -364,6 +473,24 @@ class XeniumPipeline:
         output_file = self.output_path / f"{self.sample_tag}_step2_gene_distances.csv"
         gene_distances.to_csv(output_file)
         logger.info(f"✓ 저장: {output_file}")
+
+        # 8. 시각화
+        vis.visualize_step2_gene_distances(self.output_path, self.sample_tag)
+        
+        # Step 2.3: Cell Overlaps (Optional)
+        if s2_overlaps:
+            self.adata = s2_overlaps.run_step2_overlaps(self.adata, self.output_path, self.sample_tag)
+        else:
+            logger.warning("Step 2.3 Overlaps module not loaded. Skipping.")
+
+        # Step 2.4: SSAM (Optional)
+        if s2_ssam:
+            self.adata = s2_ssam.run_step2_ssam(self.adata, self.output_path, self.sample_tag)
+        else:
+            logger.warning("Step 2.4 SSAM module not loaded. Skipping.")
+
+        # Save Checkpoint
+        # self.adata.write(self.output_path / f"{self.sample_tag}_step2_features.h5ad")
 
         return gene_distances
 
@@ -426,28 +553,84 @@ class XeniumPipeline:
         mean_nuclear_distance = reads_nuclear.groupby('cell_id')['distance'].max().mean()
         logger.info(f"  - 평균 핵 경계 (리드 기준): {mean_nuclear_distance:.2f} µm")
 
-        # 3. 최적값 결정 (논문 기반)
-        logger.info("\n[4-3] 최적값 결정 (논문 결과)...")
-        optimal_from_center = 10.71  # 논문의 평균값
-        optimal_from_nucleus_border = 5.65  # 핵 경계로부터
+        # 3. 최적값 결정을 위한 반복 시뮬레이션
+        logger.info("\n[4-3] 최적 확장 거리 시뮬레이션 (0 ~ 15 µm)...")
+        
+        # Purity 계산을 위한 샘플링 (속도 향상)
+        unique_cells = reads_valid['cell_id'].unique()
+        if len(unique_cells) > 1000:
+            purity_sample_cells = np.random.choice(unique_cells, 1000, replace=False)
+        else:
+            purity_sample_cells = unique_cells
+            
+        reads_for_purity = reads_valid[reads_valid['cell_id'].isin(purity_sample_cells)]
+        
+        simulation_results = {}
+        
+        # Test range: 0 to 15 um, step 1.0 (or 0.5 for finer grain)
+        test_range = np.arange(0, 16, 1.0)
+        
+        for d in test_range:
+            # Filter by distance
+            current_reads = reads_valid[reads_valid['distance'] <= d]
+            
+            # Metric 1: Capture (Total Reads)
+            capture_count = len(current_reads)
+            
+            # Metric 2: Pseudo-Purity (Nuclear Fraction)
+            # Assumption: Reads overlapping nucleus are "Pure". 
+            # As we expand, we add non-nuclear reads. Purity = Nuclear Reads / Total Reads
+            # This is a naive proxy but robust without Ground Truth.
+            # Ideally we check consistency with nuclear profile, but that's expensive loops.
+            # Using simple nuclear fraction on the subsample.
+            
+            current_purity_reads = reads_for_purity[reads_for_purity['distance'] <= d]
+            if len(current_purity_reads) > 0:
+                n_nuclear = current_purity_reads['overlaps_nucleus'].sum()
+                purity_score = n_nuclear / len(current_purity_reads)
+            else:
+                purity_score = 0
+            
+            simulation_results[d] = {
+                'Capture_Reads': capture_count,
+                'Global_Purity_Proxy': purity_score
+            }
+            # logger.info(f"  - Distance {d} µm: {capture_count} reads, Purity {purity_score:.3f}")
 
-        logger.info(f"  - Xenium 기본값: 15 µm (너무 큼)")
-        logger.info(f"  - 최적값 (중심에서): {optimal_from_center:.2f} µm ✓")
-        logger.info(f"  - 최적값 (핵 경계에서): {optimal_from_nucleus_border:.2f} µm ✓")
-        logger.info(f"  → 권장: {optimal_from_nucleus_border:.2f} ~ {optimal_from_center:.2f} µm")
+        results_df = pd.DataFrame.from_dict(simulation_results, orient='index')
+        results_df.index.name = 'Expansion_Distance'
+        
+        # Save results
+        
+        # Save results (Simulation Curve)
+        # Use a distinct name so it's not overwritten by the summary
+        output_file_sim = self.output_path / f"{self.sample_tag}_step4_expansion_curve.csv"
+        results_df.to_csv(output_file_sim)
+        logger.info(f"✓ 시뮬레이션 결과 저장: {output_file_sim}")
 
+        # Pick optimal: specific heuristic or just report max capture with purity > threshold?
+        # For now, we return the paper's recommendation but save our simulation
+        optimal_from_center = 10.71
+        optimal_from_nucleus_border = 5.65
+
+        # Attempt to find "Elbow" or "Intersection"? 
+        # Just logging for user to decide via visualization.
+        
         result = {
             'optimal_from_center': optimal_from_center,
             'optimal_from_nucleus_border': optimal_from_nucleus_border,
             'mean_nucleus_distance': mean_nuclear_distance,
-            'xenium_default': 15.0
+            'simulation_file': str(output_file_sim)
         }
 
-        # 4. 결과 저장
+        # 4. 결과 저장 (Summary)
         result_df = pd.DataFrame([result]).T
         output_file = self.output_path / f"{self.sample_tag}_step4_optimal_expansion.csv"
         result_df.to_csv(output_file)
         logger.info(f"✓ 저장: {output_file}")
+        
+        # 5. Visualization
+        vis.visualize_step4_optimization(self.adata, self.output_path, self.sample_tag)
 
         return result
 
@@ -492,6 +675,13 @@ class XeniumPipeline:
 
         logger.info(f"샘플링: {sample_size*100:.0f}% 데이터 사용")
 
+        # Determine if Ground Truth is available
+        has_ground_truth = 'ground_truth_celltype' in self.adata.obs
+        if has_ground_truth:
+            logger.info("Ground Truth labels found in adata.obs['ground_truth_celltype'].")
+        else:
+            logger.info("Ground Truth labels NOT found. Using Stability ARI.")
+
         # 1. 데이터 샘플링
         maxcell = int(self.adata.shape[0] * sample_size)
         adata_sample = self.adata[:maxcell, :].copy()
@@ -503,8 +693,8 @@ class XeniumPipeline:
         # Sample data for simulation to speed up if needed, though allcombs handles some logic
         # allcombs now returns (allres, sil_scores)
         try:
-            allres, sil_scores = xp.allcombs(
-                self.adata
+            allres, sil_scores = allcombs(
+                adata_sample
             )
             logger.info(f"✓ 시뮬레이션 완료: {allres.shape[1]}개 조합 생성")
         except Exception as e:
@@ -515,30 +705,114 @@ class XeniumPipeline:
         logger.info("\n[6-2] 성능 평가 (ARI)...")
         from sklearn.metrics import adjusted_rand_score
 
+        # Ground Truth 존재 여부 확인
+        if has_ground_truth:
+            logger.info("  ✓ Ground Truth 라벨 발견! Accuracy ARI를 계산합니다. (vs 'ground_truth_celltype')")
+            # Ground Truth 데이터: self.adata.obs['ground_truth_celltype']
+            # 샘플링된 데이터의 인덱스에 맞춰야 함
+            # allcombs 내부에서 샘플링을 어떻게 하는지 확인 필요.
+            # allcombs는 adata 전체를 받아서 내부적으로 처리하거나, 여기서 샘플링된 adata를 넘겨야 함.
+            # allcombs(adata_sample) passes the sample now.
+            
+            # 주의: allres의 인덱스와 adata.obs의 인덱스가 일치해야 함.
+            # CRITICAL FIX: Use adata_sample for GT labels to match allres indices
+            gt_labels = adata_sample.obs['ground_truth_celltype']
+            
+            # allres가 전체 세포에 대한 결과라면 바로 비교 가능.
+            # 만약 allres가 일부라면 정렬 필요.
+            # 보통 allcombs 결과는 입력 adata와 동일 순서/인덱스.
+        else:
+            logger.info("  ⚠ Ground Truth 라벨 없음. Stability ARI를 계산합니다. (vs 'DEFAULT_louv')")
+
         ari_scores = {}
         for col in allres.columns:
-            ari = adjusted_rand_score(
-                allres.loc[:, 'DEFAULT_louv'],
-                allres.loc[:, col]
-            )
+            if has_ground_truth:
+                # Accuracy ARI (vs Ground Truth)
+                # 공통 인덱스만 비교 (혹시 모를 불일치 방지)
+                common_idx = allres.index.intersection(gt_labels.index)
+                if len(common_idx) < len(allres):
+                    logger.warning("인덱스 불일치 발생, 공통 인덱스로 ARI 계산")
+                
+                ari = adjusted_rand_score(
+                    gt_labels.loc[common_idx],
+                    allres.loc[common_idx, col]
+                )
+            else:
+                # Stability ARI (vs Default)
+                ari = adjusted_rand_score(
+                    allres.loc[:, 'DEFAULT_louv'],
+                    allres.loc[:, col]
+                )
             ari_scores[col] = ari
 
         # Save ARI scores
-        ari_df = pd.DataFrame.from_dict(ari_scores, orient='index', columns=['ARI'])
+        ari_column_name = 'Accuracy_ARI' if has_ground_truth else 'Stability_ARI'
+        ari_df = pd.DataFrame.from_dict(ari_scores, orient='index', columns=[ari_column_name])
         ari_df.index.name = 'Combination'
         ari_csv_path = self.output_path / f"{self.sample_tag}_step6_ari_scores.csv"
-        ari_df.sort_values(by='ARI', ascending=False).to_csv(ari_csv_path)
+        ari_df.sort_values(by=ari_column_name, ascending=False).to_csv(ari_csv_path)
 
-        # Save Silhouette scores
+        # Save Silhouette scores (Keep as is)
         sil_df = pd.DataFrame.from_dict(sil_scores, orient='index', columns=['Silhouette'])
         sil_df.index.name = 'Combination'
         sil_csv_path = self.output_path / f"{self.sample_tag}_step6_silhouette_scores.csv"
         sil_df.sort_values(by='Silhouette', ascending=False).to_csv(sil_csv_path)
-
-        # Merge for final summary
+        
         summary_df = pd.merge(ari_df, sil_df, left_index=True, right_index=True)
-        summary_csv_path = self.output_path / f"{self.sample_tag}_step6_summary.csv"
-        summary_df.sort_values(by='ARI', ascending=False).to_csv(summary_csv_path)
+        summary_df.to_csv(self.output_path / f"{self.sample_tag}_step6_summary.csv")
+        logger.info(f"✓ 최종 결과 저장 (Summary): {self.output_path / f'{self.sample_tag}_step6_summary.csv'}")
+
+        # Visualization
+        vis.visualize_step6_simulation(self.output_path, self.sample_tag)
+
+        return summary_df
+
+    # =====================================================================
+    # STEP 7: 공간 도메인 분석 (SpaGCN)
+    # =====================================================================
+    def step7_spatial_domains(self):
+        """Step 7: Identify Spatial Domains using SpaGCN."""
+        logger.info("="*60)
+        logger.info("STEP 7: Spatial Domain Identification")
+        logger.info("="*60)
+        if s7_domains is None:
+            logger.warning("Module step7_spatial_domains not loaded. Skipping.")
+            return
+        
+        if self.adata is None:
+            logger.error("No data loaded.")
+            return
+
+        self.adata = s7_domains.run_step7_spatial_domains(
+            self.adata, 
+            output_path=self.output_path, 
+            sample_tag=self.sample_tag
+        )
+
+    # =====================================================================
+    # STEP 8: 공간 변수 유전자 (SVF) 분석
+    # =====================================================================
+    def step8_svf(self):
+        """Step 8: Identify Spatially Variable Features using SpatialDE."""
+        logger.info("="*60)
+        logger.info("STEP 8: SVF Identification")
+        logger.info("="*60)
+        if s8_svf is None:
+            logger.warning("Module step8_svf not loaded. Skipping.")
+            return
+            
+        if self.adata is None:
+            logger.error("No data loaded.")
+            return
+
+        s8_svf.run_step8_svf(
+            self.adata, 
+            output_path=self.output_path, 
+            sample_tag=self.sample_tag
+        )
+        
+        # Visualization
+        vis.visualize_step8_svf(self.adata, self.output_path, self.sample_tag)
 
         # Find best settings
         best_ari = max(ari_scores, key=ari_scores.get)
@@ -548,7 +822,7 @@ class XeniumPipeline:
         best_sil_val = sil_scores[best_sil]
 
         logger.info(f"\n[6-3] 최적 조합 추천:")
-        logger.info(f"  ★ 최고 안정성 (ARI 1위): {best_ari} (ARI={best_ari_val:.3f})")
+        logger.info(f"  ★ 최고 성능 ({ari_column_name} 1위): {best_ari} (ARI={best_ari_val:.3f})")
         logger.info(f"  ★ 최고 클러스터 품질 (Silhouette 1위): {best_sil} (Sil={best_sil_val:.3f})")
 
         logger.info(f"\n[6-4] GOLDEN PATH (권장) 점수:")
@@ -575,24 +849,7 @@ class XeniumPipeline:
     ):
         """
         전체 또는 부분 파이프라인 실행
-
-        Parameters
-        ----------
-        steps : List[int], optional
-            실행할 스텝 번호, by default [0, 1, 6] (필수 단계만)
-            선택: [0, 1, 2, 4, 6] (모두 실행)
-        **kwargs
-            각 단계의 파라미터
-
-        Examples
-        --------
-        >>> pipeline = XeniumPipeline(
-        ...     xenium_input_path="/path/to/xenium",
-        ...     sample_tag="my_sample"
-        ... )
-        >>> pipeline.run_full_pipeline(steps=[0, 1, 6])
         """
-
         logger.info("\n" + "="*60)
         logger.info("Xenium 분석 파이프라인 시작")
         logger.info("="*60)
@@ -601,7 +858,9 @@ class XeniumPipeline:
 
         try:
             if 0 in steps:
-                self.step0_format_xenium()
+                # Step 0에서 Ground Truth 생성 파라미터 전달
+                s0_kwargs = {k: v for k, v in kwargs.items() if k in ['generate_ground_truth', 'tissue_type', 'download_dir', 'organ']}
+                self.step0_format_xenium(**s0_kwargs)
 
             if 1 in steps:
                 self.step1_preprocess(**kwargs)
@@ -615,6 +874,12 @@ class XeniumPipeline:
             if 6 in steps:
                 self.step6_preprocessing_simulation()
 
+            if 7 in steps:
+                self.step7_spatial_domains()
+
+            if 8 in steps:
+                self.step8_svf()
+            
             logger.info("\n" + "="*60)
             logger.info("✓ 파이프라인 완료!")
             logger.info("="*60)
@@ -697,6 +962,24 @@ if __name__ == "__main__":
         if 6 in STEPS:
             step6_config = step_params.get('step6', {})
             kwargs['step6_sample_size'] = step6_config.get('sample_size', 0.05)
+
+        # Step 7 Config를 Step 0 Parameter로 변환
+        step7_config = step_params.get('step7', {})
+        # 사용자가 generate_ground_truth를 켜고 싶어하는지 확인 (기본값 설정 필요)
+        # config.yaml에 명시적 설정이 없다면, step7_config 존재 여부로 판단하거나 기본값 False
+        # 여기서는 편의상 step7_config가 비어있지 않거나, tissue_type이 있으면 True로 설정
+        generate_gt = step7_config.get('enabled', False) # config.yaml에 'enabled' 추가 권장
+        
+        # Default tissue inference
+        default_tissue = "brain" if "brain" in SAMPLE_TAG.lower() else "breast"
+        
+        kwargs['generate_ground_truth'] = generate_gt
+        kwargs['tissue_type'] = step7_config.get('tissue_type', default_tissue)
+        kwargs['download_dir'] = step7_config.get('download_dir', 'data/reference')
+        kwargs['organ'] = step7_config.get('organ', None)
+
+        if generate_gt:
+            logger.info(f"Ground Truth 생성 활성화: Tissue={kwargs['tissue_type']}")
 
         # 파이프라인 실행
         logger.info(f"\n파이프라인 실행 중...")

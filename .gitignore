@@ -23,4 +23,15 @@ __pycache__/
 .env
 .venv
 env/
-venv/
+
+# IDEs
+.idea/
+.vscode/
+
+# Large Files
+*.parquet
+*.ome.tif
+*.tiff
+*.gz
+*.tar.gz
+

@@ -15,7 +15,10 @@ import scipy as sp
 from pathlib import Path
 import tifffile
 from xb.util import get_image_shape, extract_physical_sizes, convert_polygons_to_label_image_xenium
-import squidpy as sq
+try:
+    import squidpy as sq
+except ImportError:
+    sq = None
 
 
 def format_xenium_adata(path,tag,output_path):
@@ -449,6 +452,8 @@ def format_data_neighs(adata,sname,condit,neighs=10):
     except:
         adata.obsm["spatial"]=np.array([adata.obs.X,adata.obs.Y]).transpose().astype('float64')
     adata_copy_int=adata
+    if sq is None:
+        raise ImportError("Squidpy is required for this function. Please install it with `pip install squidpy`.")
     sq.gr.spatial_neighbors(adata_copy_int,n_neighs=neighs)
     result=np.zeros([adata.shape[0],len(adata_copy_int.obs[sname].unique())])
     n=0
@@ -480,6 +485,8 @@ def format_data_neighs_colapse(adata,sname,condit,neighs=10):
     """
     adata.obsm["spatial"]=np.array([adata.obs.X,adata.obs.Y]).transpose().astype('float64')
     adata_copy_int=adata
+    if sq is None:
+        raise ImportError("Squidpy is required for this function. Please install it with `pip install squidpy`.")
     sq.gr.spatial_neighbors(adata_copy_int,n_neighs=neighs)
     result=np.zeros([adata.shape[0],adata.shape[1]])
     n=0

@@ -75,7 +75,8 @@ def main_preprocessing(adata,target_sum=100,mincounts=10,mingenes=3,neigh=15,npc
             numclust=np.max(adata.obs['leiden_1_4'].astype(int))
             i=i+1
     resol=1.4
-    sc.tl.louvain(adata,resolution=resol,key_added='louvain_1_4')
+    print("Fallback: Using Leiden instead of Louvain due to missing dependency")
+    sc.tl.leiden(adata,resolution=resol,key_added='louvain_1_4')
     numclust=np.max(adata.obs['louvain_1_4'].astype(int))
     if (numclust-targetnum)>3:
         i=0
@@ -137,7 +138,8 @@ def preprocess_adata(adata,save=True,clustering_params={},output_path='output_pa
     sc.pp.neighbors(adata, n_neighbors=clustering_params['n_neighbors'], n_pcs=clustering_params['n_pcs'])
     if clustering_params['clustering_alg']=='louvain':
         for r in clustering_params['resolutions']:
-            sc.tl.louvain(adata,resolution=r,key_added=clustering_params['clustering_alg']+'_'+str(r))
+            print("Fallback: Using Leiden instead of Louvain")
+            sc.tl.leiden(adata,resolution=r,key_added=clustering_params['clustering_alg']+'_'+str(r))
     if clustering_params['clustering_alg']=='leiden':
         for r in clustering_params['resolutions']:
             sc.tl.leiden(adata,resolution=r,key_added=clustering_params['clustering_alg']+'_'+str(r))

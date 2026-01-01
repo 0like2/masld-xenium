@@ -1,0 +1,29 @@
+
+# Data Paths
+input_anndata_path: "data/unprocessed_adata/h_breast_2.h5ad"
+output_dir: "output"
+sample_tag: "h_breast_2"
+
+# Pipeline Steps to Run
+pipeline_steps: [0, 1, 2, 4, 6, 8]  # Running full pipeline
+
+# Step 0: Formatting & Ground Truth
+# Assuming h_breast_2 needs similar GT generation as breast_1
+ground_truth_reference_path: "data/reference/human_breast_reference.h5ad"  # Reusing reference
+ground_truth_label_column: "cell_type"  # Column in reference
+ground_truth_celltype_column: "ground_truth_celltype" # Column to create in target
+
+# Step 1: Preprocessing
+preprocess_kwargs:
+  target_sum: 100
+  n_top_genes: 2000  # Default
+  min_counts: 10
+  max_counts: 5000
+  pct_counts_mt: 20
+
+# Step 6: Simulation
+simulation_kwargs:
+  n_simulations: 20 # Reduced for speed test? Or keep full? Default is comprehensive. Keep standard.
+  
+# General
+tissue_type: "breast"

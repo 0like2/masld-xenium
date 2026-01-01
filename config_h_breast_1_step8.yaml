@@ -1,0 +1,24 @@
+
+# Data Paths
+input_anndata_path: "./data/unprocessed_adata/h_breast_1.h5ad"
+output_dir: "./output"
+sample_tag: "h_breast_1"
+
+# Pipeline Steps - ONLY STEP 8
+pipeline_steps: [8]
+
+# Tissue Type (for GT - required arg even if not running Step 0)
+tissue_type: "breast"
+
+# Kwargs
+preprocess_kwargs:
+  target_sum: 100
+  mincounts: 10
+  mingenes: 3
+  neigh: 15
+  scale: False
+  hvg: False
+
+simulation_kwargs:
+  n_simulations: 618 
+  sample_size: 0.05

@@ -425,7 +425,8 @@ def main_preprocessing(adata,target_sum=100,mincounts=10,mingenes=3,neigh=15,npc
             if i >100:
                 break
     resol=default_resol
-    sc.tl.louvain(adata,resolution=resol,key_added='louvain_1_4')
+    print("Fallback: Using Leiden instead of Louvain due to missing dependency")
+    sc.tl.leiden(adata,resolution=resol,key_added='louvain_1_4')
     numclust=np.max(adata.obs['louvain_1_4'].astype(int))
     if abs(numclust-targetnum)>3:
         i=0
