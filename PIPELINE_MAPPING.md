@@ -6,25 +6,21 @@
 
 | **사용자 플로우차트 단계** | **현재 파이프라인 단계** | **설명** |
 | :--- | :--- | :--- |
-| **1. Data Loading & QC** | **Step 0 & Step 1** | 데이터 로딩 및 품질 필터링 (`min_counts`, `min_genes`) |
+| **1. Data Loading & QC** | **Step 0 & Step 1.1** | 데이터 로딩 및 품질 필터링 (`min_counts`, `min_genes`) |
+| **3. Preprocessing** | **Step 1.2** | 정규화, 로그 변환, 차원 축소 및 클러스터링 |
 | **2. Cell Segmentation & Assignment** | **Step 2, 4, 5** | 전사체-세포 거리 분석, 할당 경계 최적화, 세그멘테이션 성능 검증 |
-| **3. Preprocessing** | **Step 1** | 정규화, 로그 변환, 차원 축소 및 클러스터링 |
 | **4. SVF Feature Selection** | **Step 8** | 공간 변이 유전자(SVF) 선별 (Moran's I) |
 
 ---
 
 ## 🔬 상세 기술 분석 (Detailed Technical Reference)
 
-### 1. Data Loading & QC (사용자 Step 1)
-*   **매핑 단계**: `Step 0` & `Step 1`
+### 1. Data Loading & QC (사용자 Step 1 - 데이터 로딩 및 품질 필터링)
+*   **매핑 단계**: `Step 0` & `Step 1.1`
+*   **목적**: 원본 데이터 로드 및 저품질 세포 제거
 *   **📂 생성 파일 (Outputs)**
-    *   `{tag}_step1_preprocessed.h5ad` – 전처리 완료된 AnnData 객체 (정규화, 로그 변환 완료)
-    *   `{tag}_step1_qc_violin.png` – QC 지표 바이올린 플롯
-    *   `{tag}_step1_pca_plot.png` – PCA 시각화
-    *   `{tag}_step1_pca_variance.png` – PCA 분산 설명력 플롯
-    *   `{tag}_step1_umap_plot.png` – UMAP 클러스터링 결과
-    *   `{tag}_step1_marker_genes_dotplot.png` – 마커 유전자 발현 dot plot
-    *   `{tag}_step1_marker_genes.csv` – 마커 유전자 정보 테이블
+    *   `{tag}_step1_qc_violin.png` – QC 지표 바이올린 플롯 (필터링 전후 비교)
+    *   필터링된 AnnData 객체 (다음 단계로 전달)
 
 #### 기술 세부사항 (Technical Specs)
 
@@ -54,7 +50,22 @@ sc.pp.filter_cells(adata, min_genes=mingenes)    # mingenes=3 (기본값)
 *   **동작 방식**: 현재 파이프라인은 `QV > 20`인 리드의 비율을 **모니터링**만 수행 (경고 로그 기록). 자동 필터링은 하지 않음.
     - 이유: Xenium 기기 자체에서 이미 1차 필터링된 데이터 제공
 
-##### 1.2 정규화 (Normalization)
+---
+
+### 3. Preprocessing (사용자 Step 3 - 정규화 ~ 클러스터링)
+*   **매핑 단계**: `Step 1.2` (메인 파이프라인에서는 step1_preprocess의 [1-2] 단계)
+*   **목적**: QC 필터링된 데이터를 분석 가능한 형태로 변환 및 클러스터링
+*   **📂 생성 파일 (Outputs)**
+    *   `{tag}_step1_preprocessed.h5ad` – 전처리 완료된 AnnData 객체
+    *   `{tag}_step1_pca_plot.png` – PCA 시각화
+    *   `{tag}_step1_pca_variance.png` – PCA 분산 설명력 플롯
+    *   `{tag}_step1_umap_plot.png` – UMAP 클러스터링 결과
+    *   `{tag}_step1_marker_genes_dotplot.png` – 마커 유전자 발현 dot plot
+    *   `{tag}_step1_marker_genes.csv` – 마커 유전자 정보 테이블
+
+#### 기술 세부사항 (Technical Specs)
+
+##### 3.1 정규화 (Normalization)
 **함수**: `sc.pp.normalize_total()`
 **구현 코드** (`xb/preprocessing.py` 라인 48):
 ```python
@@ -75,7 +86,7 @@ $$X_{normalized}[i,j] = \frac{X_{raw}[i,j]}{\sum_k X_{raw}[i,k]} \times \text{ta
 
 **이유**: Xenium은 scRNA-seq 대비 전사체 카운트가 매우 낮으므로, target_sum=100 사용 (논문 권장)
 
-##### 1.3 로그 변환 (Log Transformation)
+##### 3.2 로그 변환 (Log Transformation)
 **함수**: `sc.pp.log1p()`
 **구현 코드** (`xb/preprocessing.py` 라인 50):
 ```python
@@ -92,7 +103,7 @@ $$X_{log}[i,j] = \log_e(X_{norm}[i,j] + 1)$$
 
 **+1 이유**: log(0)을 피하기 위해 모든 값에 1을 더한 후 로그 변환
 
-##### 1.4 스케일링 (Scaling) – **비활성화**
+##### 3.3 스케일링 (Scaling) – **비활성화**
 **설정** (`xb/preprocessing.py` 라인 54-55):
 ```python
 if scale==True:
@@ -103,7 +114,7 @@ if scale==True:
 - **비활성화 이유**: 공간 전사체 데이터는 노이즈가 많으므로, 스케일링이 오히려 노이즈를 증폭시킬 수 있음
 - 일반적으로 공간 데이터 분석 시 스케일링 생략 (논문 권장)
 
-##### 1.5 차원 축소 (PCA)
+##### 3.4 차원 축소 (PCA)
 **함수**: `sc.pp.pca()`
 **구현 코드** (`xb/preprocessing.py` 라인 56):
 ```python
@@ -114,7 +125,7 @@ sc.pp.pca(adata)  # 기본값: n_comps=50
 - 고차원 유전자 발현 데이터를 저차원으로 축소 (노이즈 제거)
 - 이웃 그래프 구성 시 계산 효율 증대
 
-##### 1.6 클러스터링 (Clustering)
+##### 3.5 클러스터링 (Clustering)
 **알고리즘**: Leiden Algorithm
 **구현 코드** (`xb/preprocessing.py` 라인 58-60):
 ```python
@@ -138,7 +149,7 @@ sc.tl.leiden(adata, resolution=resol)  # resol=1.4 (기본값)
 - `default=True`: target_clusters에 맞춰 resolution 자동 조정
 - resolution 증감을 반복하여 목표 개수 ±3 범위 내 도달
 
-##### 1.7 마커 유전자 식별
+##### 3.6 마커 유전자 식별
 **함수**: `sc.tl.rank_genes_groups()`
 **구현** (메인 스크립트에서):
 ```python
@@ -477,7 +488,7 @@ output/
 
 ---
 
-### Step 1: 데이터 전처리 & QC 분석
+### Step 1: 데이터 로딩 & QC 분석
 
 #### 📄 `{tag}_step1_qc_violin.png` 해석
 
@@ -563,6 +574,10 @@ outliers_counts = adata.obs[adata.obs['n_counts'] > 1000]
 outliers_genes = adata.obs[adata.obs['n_genes'] > 300]
 print(f"Cells with >1000 counts: {len(outliers_counts)} ({len(outliers_counts)/len(adata)*100:.1f}%)")
 ```
+
+---
+
+### Step 3: 전처리 & 차원 축소 분석
 
 #### 📊 `{tag}_step1_pca_plot.png` 해석 (PCA 산점도)
 

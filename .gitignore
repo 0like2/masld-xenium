@@ -5,7 +5,6 @@
 **/data
 *.rds
 *.h5ad
-output/
 figures/
 dist/
 
@@ -33,9 +32,3 @@ env/
 *.tiff
 *.gz
 *.tar.gz
-
-# EXCEPTIONS: Allow visualization outputs
-!output/**/*.png
-!output/**/*.csv
-!output/**/genes.csv
-!output/**/metadata.csv
