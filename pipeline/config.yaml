@@ -1,0 +1,118 @@
+# pipeline/config.yaml
+
+# Xenium Pipeline Configuration
+# ------------------------------------------------------------
+
+# Input/Output Settings
+input_path: "/Users/iyeonglag/PycharmProjects/masld-xenium/data/Xenium_V1_FFPE_Human_Brain_Alzheimers_With_Addon_outs"
+input_advanced: "xenium-output/cellpose_output/segments_cellpose.tif"  # Example path
+output_dir: "xenium-output"
+sample_tag: "human_alzheimers"
+
+baysor:
+  enabled: true
+  executable_path: "/usr/local/bin/baysor" # Path to baysor binary
+  params:
+    scale: 50
+    min_molecules_per_cell: 10
+    prior_segmentation_confidence: 0.8 # User requested value
+    save_polygons: true
+
+# Step 0: Formatting Parameters
+formatting:
+  mincounts: 10
+  mingenes: 3
+
+# Step 1 (New): Exploration Parameters
+exploration:
+  # Ref: 1_7 uses radius=100 for structure scores
+  neighbor_radius: 100.0
+  run_transcript_dispersion: true
+  resolutions: [0.5, 0.8, 1.0, 1.5]
+  primary_resolution: 1.0
+
+# Step 2 (New): Segmentation Free Analysis (Ref: Points2Regions etc.)
+segmentation_free:
+  run_points2regions: true
+  run_ssam: false
+  run_overlaps: false
+  
+  points2regions:
+    sigma: 2.0
+    n_clusters: 10
+    bin_width: "auto"
+    min_genes_per_bin: 5
+    
+  ssam:
+    ssam_vf_um_per_px: 2.0
+    kde_bandwidth_um: 2.5
+    norm_thres: 5
+    exp_thres: 0.2
+    min_dist: 7
+    
+  overlaps:
+    um_per_pixel: 2.0
+    um_per_pixel: 2.0
+    bw: 1
+
+# Step 3: Comparison (Metrics) - Now Executed as Step 4
+comparison:
+  run_efficiency: false
+  run_specificity: false
+  run_positivity: false  # New: Moved from Resegmentation
+  run_diffusion: false   # New: Moved from Resegmentation
+  
+  # Optional: Comparison with other datasets
+  # visium_path: "/path/to/visium.h5ad"
+
+# Step 4: Resegmentation (Cellpose)
+resegmentation:
+  run_resegmentation: false
+  
+  cellpose:
+    use_gpu: false
+    model_type: 'nuclei'
+    diameter: null # Auto-detect if null
+    channels: [0, 0] # Grayscale
+    
+  # Domain Assignment Params (from Notebook 3.2 logic if implemented)
+  domain_assignment:
+    n_domains: 5
+
+# Step 5: Optimal Expansion
+optimal_expansion:
+  run_expansion: false
+  subsample_fraction: 0.01  # Fraction of assigned cells to use for KDTree speedup (Ref: 4_1 notebook)
+  distance_threshold: null  # Optional max distance (null = assigning to nearest regardless of dist)
+
+# Step 7: Simulation & Preprocessing
+simulation:
+  run_simulation: true
+  census_tissue: "brain" # Tissue to download from CellxGene Census
+  census_organism: "mus_musculus"
+  
+  # Simulation Parameters
+  n_markers: 200
+  n_reads_per_gene: 40
+  noise_percentage: 10.0 # %
+  missegmentation_percentage: 10.0 # %
+  
+  # Assessment Parameters
+  n_permutations: 30 # Number of preprocessing combinations to test
+  reference_key: "cell_type" # Column in scRNAseq to use as ground truth
+
+# Step 2 (Original -> Deferred): Preprocessing Parameters
+preprocessing:
+  target_sum: 100
+  neigh: 15
+  scale: false
+  hvg: false
+
+# Step 2: Annotation Parameters (Original Step 2 - Deferred)
+# (Params moved to exploration for the new flow)
+annotation:
+  # keeping empty or legacy params if any
+  {}
+
+# Execution Settings
+use_parquet: true  # Use .parquet files if available (faster)

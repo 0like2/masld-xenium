@@ -1,0 +1,4 @@
+Total Transcripts: 16371520
+Assigned Transcripts: 12399651
+Median Distance: 8.73312226396239
+Mean Distance: 8.91985575750735

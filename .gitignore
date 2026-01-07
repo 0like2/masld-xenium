@@ -32,3 +32,7 @@ env/
 *.tiff
 *.gz
 *.tar.gz
+
+# Output directories
+xenium-output/
+output/
