@@ -193,6 +193,12 @@ def main():
         # Transcripts path (original)
         curr_transcripts = transcripts_csv_path if transcripts_csv_path else os.path.join(input_path, "transcripts.csv")
 
+        # Check for generated domain map from Step 2
+        potential_domain_map = os.path.join(step2_dir, "points2regions", "domain_polygons.json")
+        if os.path.exists(potential_domain_map):
+            print(f"  > Using automatically generated domain map: {potential_domain_map}")
+            step3_config.setdefault('resegmentation', {}).setdefault('domain_assignment', {})['domain_map_path'] = potential_domain_map
+
         step3.run_step3(step3_config, dapi_path, curr_transcripts, step3_dir)
         
         with open(step3_marker, "w") as f:
@@ -229,7 +235,7 @@ def main():
             current_adata_path = step1_adata_path
             current_transcripts_path = transcripts_csv_path # Raw transcripts
             
-        step4.run_step4(step4_config, current_adata_path, current_transcripts_path, step4_dir)
+        step4.run_step4(step4_config, current_adata_path, current_transcripts_path, step4_dir, original_adata_path=step1_adata_path, original_transcripts_path=transcripts_csv_path)
         with open(step4_marker, "w") as f:
             f.write("done")
 

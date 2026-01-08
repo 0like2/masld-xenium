@@ -21,7 +21,7 @@ baysor:
 # Step 0: Formatting Parameters
 formatting:
   mincounts: 10
-  mingenes: 3
+  mingenes: 10
 
 # Step 1 (New): Exploration Parameters
 exploration:
@@ -35,13 +35,13 @@ exploration:
 segmentation_free:
   run_points2regions: true
   run_ssam: false
-  run_overlaps: false
+  run_overlaps: true
   
   points2regions:
-    sigma: 2.0
-    n_clusters: 10
-    bin_width: "auto"
-    min_genes_per_bin: 5
+    sigma: 3.0
+    n_clusters: [50, 100, 200, 500]
+    bin_width: 1.0
+    min_genes_per_bin: 15
     
   ssam:
     ssam_vf_um_per_px: 2.0
@@ -52,18 +52,19 @@ segmentation_free:
     
   overlaps:
     um_per_pixel: 2.0
-    um_per_pixel: 2.0
+    radius: 50.0
     bw: 1
 
 # Step 3: Comparison (Metrics) - Now Executed as Step 4
 comparison:
-  run_efficiency: false
-  run_specificity: false
-  run_positivity: false  # New: Moved from Resegmentation
-  run_diffusion: false   # New: Moved from Resegmentation
+  run_efficiency: true
+  run_specificity: true
+  run_positivity: true  # New: Moved from Resegmentation
+  run_diffusion: true   # New: Moved from Resegmentation
   
   # Optional: Comparison with other datasets
-  # visium_path: "/path/to/visium.h5ad"
+  visium_path: null
+  sc_reference_path: null # Path to scRNAseq reference .h5ad for Specificity (NMP) analysis
 
 # Step 4: Resegmentation (Cellpose)
 resegmentation:
@@ -78,6 +79,7 @@ resegmentation:
   # Domain Assignment Params (from Notebook 3.2 logic if implemented)
   domain_assignment:
     n_domains: 5
+    domain_map_path: "figures/2.comparison_between_datasets/polygons/regions_multisection_1.json" # Path to domain polygons (JSON)
 
 # Step 5: Optimal Expansion
 optimal_expansion:

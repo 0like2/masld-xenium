@@ -8,6 +8,9 @@ from skimage.measure import label, regionprops
 from skimage.segmentation import expand_labels
 from tqdm import tqdm
 import gc
+import json
+from shapely.geometry import Point, Polygon
+import matplotlib.pyplot as plt
 
 def run_step3(config, dapi_image_path, transcripts_path, output_dir):
     """
@@ -134,28 +137,92 @@ def run_step3(config, dapi_image_path, transcripts_path, output_dir):
         print(f"Error creating AnnData: {e}")
         return
     
-    # 5. Domain Assignment
-    print("Running Domain Assignment (Spatial Clustering)...")
-    if adata.n_obs > 50:
+    # 5. Domain Assignment (Polygon Overlap)
+    print("Running Domain Assignment (Polygon Overlap)...")
+    
+    # Get Domain Map Path
+    domain_map_path = reseg_config.get('domain_assignment', {}).get('domain_map_path', None)
+    
+    # Adjust path if relative (Config usually relative to root)
+    if domain_map_path:
+        # Check absolute or relative to root
+        if not os.path.exists(domain_map_path):
+             # Try prepending project root (../..) assumption or just rely on user provided path
+             pass 
+    
+    if domain_map_path and os.path.exists(domain_map_path):
+        print(f"  > Loading Domain Map from: {domain_map_path}")
         try:
-            domain_config = config.get('resegmentation', {}).get('domain_assignment', {})
-            resolution = domain_config.get('resolution', 0.5)
+            with open(domain_map_path, 'r') as f:
+                domain_data = json.load(f)
+                
+            # Initialize region annotation
+            adata.obs['region_annotation'] = 'None'
             
-            print(f"  > Computing spatial neighbors...")
-            adata.obsm['spatial'] = adata.obs[['x_centroid', 'y_centroid']].values
-            sc.pp.neighbors(adata, use_rep='spatial', n_neighbors=30, key_added='spatial')
+            # Iterate through regions in JSON
+            # Structure from Notebook: List of objects with 'coordinates' and 'name'
+            count_assigned = 0
             
-            print(f"  > Running Leiden clustering for domains (res={resolution})...")
-            sc.tl.leiden(adata, resolution=resolution, key_added='spatial_domain', neighbors_key='spatial')
-            print(f"  > Domains assigned. Found {adata.obs['spatial_domain'].nunique()} domains.")
+            print(f"  > Processing {len(domain_data)} domains...")
+            
+            for region in tqdm(domain_data, desc="Assigning Domains"):
+                region_name = region.get('name', 'Unknown')
+                
+                # Check for coordinates
+                if 'coordinates' not in region or not region['coordinates']:
+                    continue
+                    
+                # Notebook logic implies coordinates[0] is the main polygon ring
+                # Coords are [[y, x], ...] based on Notebook dataframe construction
+                # Notebook: output.loc[nu,:] = [ob['coordinates'][0][num][0], ob['coordinates'][0][num][1]...] -> y, x
+                
+                raw_coords = region['coordinates'][0] 
+                
+                # Ensure closed polygon
+                if raw_coords[0] != raw_coords[-1]:
+                    raw_coords.append(raw_coords[0])
+                    
+                # Create Shapely Polygon
+                # Note: Shapely uses (x, y) usually, but here we construct Point(y, x) later to match.
+                # Consistent coordinate system is key.
+                poly_coords = [(pt[0], pt[1]) for pt in raw_coords]
+                poly = Polygon(poly_coords)
+                
+                # Assign cells
+                # Vectorized point checking is hard with pure Shapely, check bounding box first?
+                # Optimization: Check bounding box of polygon vs cells
+                min_x, min_y, max_x, max_y = poly.bounds
+                
+                # Select candidate cells (Approximate filter)
+                # Note: We store y_centroid, x_centroid
+                # Poly coords are (y, x) based on notebook logic
+                
+                candidates = adata.obs[
+                    (adata.obs['y_centroid'] >= min_x) & (adata.obs['y_centroid'] <= max_x) &
+                    (adata.obs['x_centroid'] >= min_y) & (adata.obs['x_centroid'] <= max_y)
+                ].index
+                
+                for cell_id in candidates:
+                    y = adata.obs.loc[cell_id, 'y_centroid']
+                    x = adata.obs.loc[cell_id, 'x_centroid']
+                    pnt = Point(y, x)
+                    
+                    if pnt.within(poly):
+                        adata.obs.loc[cell_id, 'region_annotation'] = region_name
+                        count_assigned += 1
+
+            print(f"  > Domain Assignment Complete. Assigned {count_assigned} cells.")
             
             # Save again with domains
+            print(f"Saving AnnData with Domains to {adata_out_path}...")
             adata.write(adata_out_path)
             
         except Exception as e:
             print(f"Error in Domain Assignment: {e}")
+            import traceback
+            traceback.print_exc()
     else:
-        print("Not enough cells for Domain Assignment.")
+        print(f"Domain map not found at {domain_map_path}. Skipping Domain Assignment.")
         
     print("Step 3: Resegmentation & Domain Assignment Completed.")
 

@@ -31,13 +31,59 @@ def plotting_settings():
     plt.rcParams['figure.facecolor'] = 'white'
     # sns.set_style("whitegrid") # Overridden by seaborn-white preference
 
-def calculate_general_stats(adata, output_dir, sample_tag):
-    """Calculates general dataset statistics (Ref: 1_1 notebook)"""
-    print("\n[Step 1-1] Calculating General Statistics (Ref: 1_1)...")
+def _decode_bytes(df):
+    """Decodes byte columns to utf-8 strings."""
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            # Check first non-null element to see if it is bytes
+            first_valid = df[col].dropna().iloc[0] if not df[col].dropna().empty else None
+            if isinstance(first_valid, bytes):
+                print(f"    - Decoding bytes column: {col}")
+                # Decode bytes to string
+                df[col] = df[col].apply(lambda x: x.decode('utf-8') if isinstance(x, bytes) else x)
+    return df
+
+def load_transcripts_sidecar(adata_path, sample_tag):
+    """Loads transcripts from sidecar parquet/csv if not in adata.uns"""
+    # Try Step 0 directory first (standard path)
+    if adata_path:
+        step0_dir = os.path.dirname(adata_path)
+    else:
+        # Fallback to current dir ? 
+        step0_dir = "."
+
+    df = None
+    # Try Parquet first (new standard)
+    parquet_path = os.path.join(step0_dir, f"{sample_tag}_transcripts.parquet")
+    if os.path.exists(parquet_path):
+        print(f"    - Loading transcripts from sidecar: {parquet_path}")
+        df = pd.read_parquet(parquet_path)
     
+    # Check for legacy standard name
+    elif os.path.exists(os.path.join(step0_dir, "transcripts.parquet")):
+        parquet_path_simple = os.path.join(step0_dir, "transcripts.parquet")
+        df = pd.read_parquet(parquet_path_simple)
+        
+    # Check for legacy CSV
+    elif os.path.exists(os.path.join(step0_dir, "transcripts.csv")):
+        csv_path = os.path.join(step0_dir, "transcripts.csv")
+        print(f"    - Loading transcripts from sidecar CSV: {csv_path}")
+        df = pd.read_csv(csv_path, low_memory=False)
+        
+    if df is not None:
+        # Decode bytes if present
+        df = _decode_bytes(df)
+        return df
+        
+    return None
+
+def calculate_general_stats(adata, output_dir, sample_tag, spots=None):
+    """Calculates general dataset statistics (Ref: 1_1)..."""
+    print("\n[Step 1-1] Calculating General Statistics (Ref: 1_1)...")
+
     # Ensure QC metrics are fresh
     sc.pp.calculate_qc_metrics(adata, percent_top=None, log1p=False, inplace=True)
-    
+
     stats = {
         "n_cells": adata.n_obs,
         "n_genes": adata.n_vars,
@@ -46,141 +92,166 @@ def calculate_general_stats(adata, output_dir, sample_tag):
         "total_counts": np.sum(adata.obs['total_counts'])
     }
     
-    # Cell area stats if available
-    if 'cell_area' in adata.obs:
-         stats["median_cell_area"] = np.median(adata.obs['cell_area'])
+    # [NEW] Add Spot-level QC metrics from metadata if available (calculated in Step 0)
+    # Step 0 computes total_counts_control, total_counts_raw
+    if 'pct_counts_control' in adata.obs:
+        stats['median_pct_control_reads'] = np.median(adata.obs['pct_counts_control'])
+        stats['mean_pct_control_reads'] = np.mean(adata.obs['pct_counts_control'])
+    
+    # [NEW] Add Spot-level QC metrics from raw spots table if available
+    if spots is not None:
+        n_total_reads = len(spots)
+        stats['total_reads'] = n_total_reads
+        
+        # Quality Value > 20
+        if 'qv' in spots.columns:
+            prop_qv20 = (spots['qv'] > 20).mean()
+            stats['reads_prop_qv>20'] = prop_qv20
+        
+        # Reads in Panel (already filtered controls in Step 0)
+        # Check against valid genes in filtered adata
+        valid_genes = set(adata.var_names)
+        if 'feature_name' in spots.columns:
+            # Count how many of the *raw* spots match the *filtered* gene list
+            n_in_panel = spots['feature_name'].isin(valid_genes).sum()
+            stats['prop_reads_in_panel'] = n_in_panel / n_total_reads
+            
+        # Assigned to cells
+        if 'cell_id' in spots.columns:
+             # Check if adata has 'cell_id' column (preferred) or use index
+             if 'cell_id' in adata.obs.columns:
+                 valid_cells = set(adata.obs['cell_id'])
+             else:
+                 valid_cells = set(adata.obs_names)
+                 
+             n_assigned = spots['cell_id'].isin(valid_cells).sum()
+             stats['prop_reads_assigned_to_cells'] = n_assigned / n_total_reads
+        
+        # Proportion cells > 10 reads        
+        # Proportion cells > 10 reads
+        n_cells_gt_10 = (adata.obs['total_counts'] > 10).sum()
+        stats['proportion_cells>10reads'] = n_cells_gt_10 / adata.n_obs
+    else:
+        print("    [WARNING] No transcripts data available for Spot-level QC stats.")
 
-    # Save stats to simple text report
-    report_file = os.path.join(output_dir, f"{sample_tag}_step1_stats.txt")
-    with open(report_file, "w") as f:
+    # Save statistics
+    print("    - Stats:", stats)
+    with open(os.path.join(output_dir, f"{sample_tag}_step1_stats.txt"), "w") as f:
         for k, v in stats.items():
             f.write(f"{k}: {v}\n")
-    print(f"    - Saved stats to {report_file}")
-    
-    # Plot Histograms
-    fig, axs = plt.subplots(1, 2, figsize=(10, 4))
-    sns.histplot(adata.obs['total_counts'], bins=50, ax=axs[0], color='skyblue')
-    axs[0].set_title('Total Counts per Cell')
-    sns.histplot(adata.obs['n_genes_by_counts'], bins=50, ax=axs[1], color='lightgreen')
-    axs[1].set_title('Genes Detected per Cell')
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f"{sample_tag}_step1_qc_hist.png"))
-    plt.close()
 
-    # Plot Highest Expressed Genes (Top 20)
-    print("    - Plotting highest expressed genes...")
-    sc.pl.highest_expr_genes(adata, n_top=20, show=False)
-    plt.title("Highest Expressed Genes")
-    plt.savefig(os.path.join(output_dir, f"{sample_tag}_step1_highest_expr_genes.png"), bbox_inches='tight')
-    plt.close()
 
-def calculate_transcript_dispersion(adata, output_dir, sample_tag):
+def calculate_transcript_dispersion(adata, output_dir, sample_tag, spots=None):
     """
-    Calculates distance of each transcript to its assigned cell centroid (Ref: 1_3).
-    Optimized vectorized implementation.
+    Calculates dispersion metrics for transcripts (Ref: 1_3).
+    Prioritizes 'nucleus_distance' if available, otherwise calculates Euclidean distance to cell centroid.
     """
     print("\n[Step 1-X] Deep QC: Transcript Dispersion Analysis (Ref: 1_3)...")
-    
-    if 'spots' not in adata.uns:
-        print("    [WARNING] No 'spots' (transcripts) data found in adata.uns. Skipping.")
+
+    if spots is None:
+        print("    [WARNING] No transcripts data provided. Skipping dispersion analysis.")
         return
 
     # 1. Prepare Data
     print("    - Preparing transcript data...")
-    spots = adata.uns['spots'].copy()
+    # Don't copy if not needed, but safe
+    spots = spots.copy()
     
-    # Needs cell info with centroids
+    # Needs cell info
     if 'x_centroid' not in adata.obs.columns or 'y_centroid' not in adata.obs.columns:
-        print("    [WARNING] Cell centroids (x_centroid, y_centroid) missing in adata.obs. Skipping.")
-        return
-        
-    # Map cell centroids to spots based on 'cell_id' or index
-    # Note: 'spots' usually has 'cell_id' column or index is cell_id? 
-    # Let's inspect typical structure. Step0 loads transcripts.csv.
-    # Usually 'cell_id' is a column in transcripts.csv if it's the assigned transcripts file.
+        print("    [WARNING] Cell centroids (x_centroid, y_centroid) missing in adata.obs. Skipping Euclidean calculation.")
     
+    # Usually 'cell_id' is a column in transcripts.csv
     if 'cell_id' not in spots.columns:
-        # Sometimes 'cell_id' is the index if loaded that way, or maybe 'cell_uuid'
-        # If standard Xenium format, 'cell_id' should be there for assigned transcripts.
-        # If unassigned ones are included (cell_id = UNASSIGNED), we filter them.
-        print("    [WARNING] 'cell_id' column missing in spots dataframe. Checking index/content...")
         if spots.index.name == 'cell_id':
             spots = spots.reset_index()
         else:
-             print("    [ERROR] Cannot link spots to cells. Skipping.")
+             print("    [ERROR] Cannot link spots to cells (missing 'cell_id'). Skipping.")
              return
              
     # Filter for assigned transcripts only
+    # Match cell_id to adata.obs.index OR adata.obs['cell_id']
+    if 'cell_id' in adata.obs.columns:
+        valid_cells = set(adata.obs['cell_id'])
+    else:
+        valid_cells = set(adata.obs.index)
+
+    spots_assigned = spots[spots['cell_id'].isin(valid_cells)]
+    
     n_total = len(spots)
-    # Assuming 'cell_id' is string matching adata.obs.index or 'UNASSIGNED'
-    # Filter out unassigned or negative IDs
-    spots_assigned = pd.DataFrame() # Initialize
-    
-    # Strategy: Merge on 'cell_id' column if available, else index
-    match_col = 'cell_id' if 'cell_id' in adata.obs.columns else None
-    
-    if match_col:
-        print(f"    - Linking spots to cells using 'cell_id' column...")
-        # Check overlap
-        overlap = spots['cell_id'].isin(adata.obs[match_col]).sum()
-        if overlap > 0:
-            spots_assigned = spots[spots['cell_id'].isin(adata.obs[match_col])]
-        else:
-             print("    [WARNING] 'cell_id' column exists but values don't overlap with spots. Trying index...")
-             match_col = None
-    
-    if not match_col:
-        # Fallback to index
-        if 'cell_id' in spots.columns:
-            overlap = spots['cell_id'].isin(adata.obs.index).sum()
-            if overlap > 0:
-                 print(f"    - Linking spots to cells using adata index...")
-                 spots_assigned = spots[spots['cell_id'].isin(adata.obs.index)]
-                 
     n_assigned = len(spots_assigned)
 
     if n_assigned == 0:
-        print(f"    [ERROR] Could not link spots to cells (checked 'cell_id' col and index). Deep QC failed.")
+        print(f"    [WARNING] No assigned transcripts found matching filtered cells. Skipping dispersion.")
         return
 
-    print(f"    - analyzing {n_assigned} assigned transcripts (out of {n_total})...")
+    print(f"    - Analyzing {n_assigned} assigned transcripts (out of {n_total})...")
     
-    # 2. Vectorized Distance Calculation
-    print("    - Merging cell coordinates...")
+    # 2. Logic Branch: Metric Selection
+    distances = None
+    metric_name = "distance_to_centroid"
     
-    if match_col:
+    # Option A: Pre-calculated Nucleus Distance
+    if 'nucleus_distance' in spots_assigned.columns:
+        print("    - Found 'nucleus_distance' column. Using pre-calculated values.")
+        distances = spots_assigned['nucleus_distance']
+        metric_name = "distance_to_nucleus"
+        
+    # Option B: Calculate Euclidean Distance to Centroid
+    elif 'x_centroid' in adata.obs.columns:
+        print("    - 'nucleus_distance' not found. Calculating Euclidean distance to Cell Centroid...")
+        
+        # Merge cell coordinates
+        if 'cell_id' in adata.obs.columns:
+            right_on_key = 'cell_id'
+            use_index = False
+        else:
+             right_on_key = None
+             use_index = True
+             
         merged = spots_assigned.merge(
-            adata.obs[['x_centroid', 'y_centroid', match_col]], 
+            adata.obs[['x_centroid', 'y_centroid'] + ([right_on_key] if right_on_key else [])], 
             left_on='cell_id', 
-            right_on=match_col, 
+            right_on=right_on_key,
+            right_index=use_index, 
             how='left'
         )
+    
+        dx = merged['x_location'] - merged['x_centroid']
+        dy = merged['y_location'] - merged['y_centroid']
+        distances = np.sqrt(dx**2 + dy**2)
+    
     else:
-        merged = spots_assigned.merge(
-            adata.obs[['x_centroid', 'y_centroid']], 
-            left_on='cell_id', 
-            right_index=True, 
-            how='left'
-        )
-    
-    print("    - Computing Euclidean distances...")
-    # dist = sqrt((x_spot - x_cell)^2 + (y_spot - y_cell)^2)
-    # spots usually have 'x_location', 'y_location'
-    dx = merged['x_location'] - merged['x_centroid']
-    dy = merged['y_location'] - merged['y_centroid']
-    distances = np.sqrt(dx**2 + dy**2)
-    
+        print("    [ERROR] Missing required columns for dispersion calculation.")
+        return
+        
     # 3. Stats & Plotting
+    if distances is None or len(distances) == 0:
+        try:
+            # Fallback if distances is None but somehow we got here
+            pass
+        except:
+             return
+        print("    [WARNING] No valid distances computed.")
+        return
+        
+    # Handle NaNs
+    distances = distances.dropna()
+    
     mean_dist = np.mean(distances)
     median_dist = np.median(distances)
-    print(f"    - Median distance to centroid: {median_dist:.2f} (unit)")
+    print(f"    - Median {metric_name}: {median_dist:.2f}")
     
     # Plot Distribution
     plt.figure(figsize=(8, 6))
     sns.histplot(distances, bins=100, kde=True, color='purple')
-    plt.title(f"Transcript-Centroid Distance Distribution\nMedian: {median_dist:.2f}")
-    plt.xlabel("Distance")
+    plt.title(f"Transcript Dispersion Distribution\nMetric: {metric_name} | Median: {median_dist:.2f}")
+    plt.xlabel(f"{metric_name} (pixels/microns)")
     plt.ylabel("Count")
+    
+    # Optional: Clip outliers for better visualization
+    q99 = np.percentile(distances, 99)
+    plt.xlim(0, q99)
     
     save_path = os.path.join(output_dir, f"{sample_tag}_step1_dispersion_dist.png")
     plt.savefig(save_path)
@@ -189,6 +260,7 @@ def calculate_transcript_dispersion(adata, output_dir, sample_tag):
     
     # Save metrics to a file
     with open(os.path.join(output_dir, f"{sample_tag}_step1_dispersion_metrics.txt"), "w") as f:
+        f.write(f"Metric Used: {metric_name}\n")
         f.write(f"Total Transcripts: {n_total}\n")
         f.write(f"Assigned Transcripts: {n_assigned}\n")
         f.write(f"Median Distance: {median_dist}\n")
@@ -454,19 +526,29 @@ def run_step1(config):
              if os.path.exists(step0_path):
                  input_file_step0 = step0_path
     
-    if os.path.exists(input_file_step0):
+    if input_file_step0 and os.path.exists(input_file_step0):
         print(f"  > Reading: {input_file_step0}")
         adata = sc.read_h5ad(input_file_step0)
     else:
-        logger.error(f"No Step 0 input found at {input_file_step0}. Stop.")
+        logger.error(f"No Step 0 input found at {input_file_step0} or path check failed. Stop.")
         return None
 
+    # Load Transcripts Sidecar
+    spots = None
+    if 'spots' in adata.uns:
+        # Backward compatibility or if user forced it back
+        print("  > Found 'spots' in adata.uns (Legacy format).")
+        spots = adata.uns['spots']
+    else:
+        spots = load_transcripts_sidecar(input_file_step0, sample_tag)
+
     # 1. General Stats (1_1)
-    calculate_general_stats(adata, input_dir, sample_tag)
+    # Pass spots explicitely
+    calculate_general_stats(adata, input_dir, sample_tag, spots=spots)
     
     # 1-X. Deep QC (Optional)
     if run_dispersion:
-        calculate_transcript_dispersion(adata, input_dir, sample_tag)
+        calculate_transcript_dispersion(adata, input_dir, sample_tag, spots=spots)
     else:
         print("\n[Step 1-X] Deep QC skipped (enable 'run_transcript_dispersion' in config to run)")
 

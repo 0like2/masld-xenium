@@ -77,13 +77,92 @@ def format_xenium_adata_mid_2023(path, tag, output_path):
         cell_info = pd.read_csv(cells_path)
         
         features_path = os.path.join(cfm_path, 'features.tsv')
-        features = pd.read_csv(features_path, sep='\t', header=None, index_col=0)
+        
+        # [MODIFIED] Dynamic Feature Column Handling
+        try:
+            # Read headerless first to inspect
+            features_df = pd.read_csv(features_path, header=None, sep='\t')
+            
+            if features_df.shape[1] == 3:
+                features_df.columns = ['gene_id', 'gene_name', 'reason_of_inclusion']
+                # Use gene_name as index if unique, else gene_id
+                if features_df['gene_name'].is_unique:
+                    features_df.index = features_df['gene_name']
+                    features_df.index.name = 'index'
+                else:
+                     features_df.index = features_df['gene_id']
+                     features_df.index.name = 'index'
+
+            elif features_df.shape[1] == 2:
+                features_df.columns = ['gene_id', 'reason_of_inclusion']
+                features_df['gene_name'] = features_df['gene_id'] # Fallback
+                features_df.index = features_df['gene_id']
+                features_df.index.name = 'index'
+            else:
+                print(f"    [WARNING] Unexpected number of columns in features.tsv: {features_df.shape[1]}. Proceeding with default indexing.")
+                features_df.index.name = 'index'
+                
+            features = features_df
+            
+        except Exception as e:
+            print(f"    [ERROR] Failed to read/parse features.tsv: {e}")
+            raise e
         
         # Construct AnnData
         adata = sc.AnnData(ad.transpose(), obs=cell_info, var=features)
-        adata.var.index.name = 'index'
-        adata.var.index.name = 'index'
-        adata.var.columns = ['gene_id', 'reason_of_inclusion']
+        
+        # ------------------------------------------------------------------
+        # [NEW] Negative Control Handling & QC
+        # ------------------------------------------------------------------
+        print("  > Identifying and handling Negative Controls (QC)...")
+        
+        # Identify controls
+        # Matches: NegControlProbe_, NegControlCodeword_, antisense_, BLANK
+        control_mask = (
+            adata.var['gene_id'].str.contains('NegControlProbe_', case=False) |
+            adata.var['gene_id'].str.contains('NegControlCodeword_', case=False) |
+            adata.var['gene_id'].str.contains('antisense_', case=False) |
+            adata.var['gene_id'].str.contains('BLANK', case=False)
+        )
+        
+        adata.var['is_control'] = control_mask
+        n_controls = control_mask.sum()
+        print(f"  > Found {n_controls} negative control features.")
+
+        # Calculate QC metrics BEFORE filtering
+        # This allows us to track noise levels per cell
+        
+        # 1. Total counts per cell (including controls)
+        # Using numpy array for efficiency and flattening
+        adata.obs['total_counts_raw'] = np.array(adata.X.sum(axis=1)).flatten()
+        
+        # 2. Control counts per cell
+        if n_controls > 0:
+            control_genes = adata[:, control_mask]
+            adata.obs['total_counts_control'] = np.array(control_genes.X.sum(axis=1)).flatten()
+            
+            # Avoid division by zero
+            with np.errstate(divide='ignore', invalid='ignore'):
+                adata.obs['pct_counts_control'] = (adata.obs['total_counts_control'] / adata.obs['total_counts_raw']) * 100
+            adata.obs['pct_counts_control'] = adata.obs['pct_counts_control'].fillna(0.0)
+            
+            # Log global stats
+            total_control_reads = adata.obs['total_counts_control'].sum()
+            total_raw_reads = adata.obs['total_counts_raw'].sum()
+            if total_raw_reads > 0:
+                global_control_pct = (total_control_reads / total_raw_reads) * 100
+                print(f"  > Global % Control Reads: {global_control_pct:.2f}%")
+        else:
+            adata.obs['total_counts_control'] = 0.0
+            adata.obs['pct_counts_control'] = 0.0
+
+        # ------------------------------------------------------------------
+        # [NEW] Filter Control Probes
+        # ------------------------------------------------------------------
+        print("  > Filtering out negative control probes from AnnData object...")
+        original_shape = adata.shape
+        adata = adata[:, ~adata.var['is_control']].copy()
+        print(f"  > Filtered controls: {original_shape} -> {adata.shape}")
         
         # Add spatial coordinates
         if 'x_centroid' in cell_info.columns and 'y_centroid' in cell_info.columns:
@@ -126,10 +205,41 @@ def format_xenium_adata_mid_2023(path, tag, output_path):
 
     # Load Transcripts (Spots)
     print("  > Loading transcripts (this may take a while)...")
-    transcripts_path = os.path.join(path, 'transcripts.csv')
-    if os.path.exists(transcripts_path):
-        transcripts = pd.read_csv(transcripts_path, index_col=0)
-        adata.uns['spots'] = transcripts
+    transcripts_parquet = os.path.join(path, 'transcripts.parquet')
+    transcripts_csv = os.path.join(path, 'transcripts.csv')
+    transcripts_csv_gz = os.path.join(path, 'transcripts.csv.gz')
+    
+    transcripts = None
+    if os.path.exists(transcripts_parquet):
+        print(f"  > Reading transcripts from Parquet: {transcripts_parquet}")
+        transcripts = pd.read_parquet(transcripts_parquet)
+    elif os.path.exists(transcripts_csv):
+        print(f"  > Reading transcripts from CSV: {transcripts_csv}")
+        # Use low_memory=False to prevent mixed type warnings or chunking issues
+        transcripts = pd.read_csv(transcripts_csv, low_memory=False) 
+    elif os.path.exists(transcripts_csv_gz):
+        print(f"  > Reading transcripts from GZ CSV: {transcripts_csv_gz}")
+        transcripts = pd.read_csv(transcripts_csv_gz, compression='gzip', low_memory=False)
+    
+    if transcripts is not None:
+        print(f"  > Transcripts shape: {transcripts.shape}")
+        
+        # Ensure cell_id logic matches (Step 1 expects cell_id column)
+        if 'cell_id' not in transcripts.columns and transcripts.index.name == 'cell_id':
+            transcripts = transcripts.reset_index()
+            
+        # [CHANGE] Do not store in adata.uns['spots'] to avoid H5AD save errors and file bloat
+        # adata.uns['spots'] = transcripts
+        # Instead, save as sidecar parquet
+        spots_path = os.path.join(output_path, f"{tag}_transcripts.parquet")
+        print(f"  > Saving transcripts to independent file: {spots_path}")
+        transcripts.to_parquet(spots_path)
+        
+        # Store path in uns for reference, or just rely on naming convention
+        adata.uns['spots_path'] = spots_path
+        print("  > Stored 'spots_path' in adata.uns")
+    else:
+        print("  [WARNING] No transcripts file found (checked parquet/csv/gz).")
     
     # Load Analysis Results (UMAP, PCA, Clusters)
     print("  > Loading analysis results...")
@@ -179,11 +289,35 @@ def format_xenium_adata_mid_2023(path, tag, output_path):
 
     # Finalize
     adata.X = sp.csr_matrix(adata.X)
+    
+    # Clean up any potential spots residue if using older template
     if 'spots' in adata.uns:
-        adata.uns['spots'] = adata.uns['spots'].fillna(0)
-        if 'fov_name' in adata.uns['spots'].columns:
-            adata.uns['spots']['fov_name'] = adata.uns['spots']['fov_name'].astype(str)
-            
+        del adata.uns['spots']
+
+    # Sanitize ALL uns and obs for potential object types that h5py dislikes
+    # 1. Check obs/var columns
+    for df in [adata.obs, adata.var]:
+        for col in df.columns:
+            if df[col].dtype == 'object':
+                try:
+                    df[col] = df[col].astype(str).astype('category')
+                except:
+                    print(f"  [WARNING] Could not convert column {col} to category. Converting to string.")
+                    df[col] = df[col].astype(str)
+    
+    # 2. Check uns values
+    keys_to_remove = []
+    for k, v in adata.uns.items():
+        if isinstance(v, dict):
+            # Recursively check? Or just skip/stringify
+            continue
+        if hasattr(v, 'dtype'):
+             if v.dtype == 'object':
+                 try:
+                     adata.uns[k] = v.astype(str)
+                 except:
+                     pass
+
     # Save
     out_file = os.path.join(output_path, f"{tag}.h5ad")
     print(f"  > Saving to {out_file}...")
