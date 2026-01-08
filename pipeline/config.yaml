@@ -21,7 +21,7 @@ baysor:
 # Step 0: Formatting Parameters
 formatting:
   mincounts: 10
-  mingenes: 10
+  mingenes: 3
 
 # Step 1 (New): Exploration Parameters
 exploration:
