@@ -18,6 +18,7 @@ from sklearn.metrics import normalized_mutual_info_score
 from shapely.geometry import Point, Polygon
 from tqdm import tqdm
 import alphashape
+import squidpy as sq
 
 def dist_nuc(reads_ctdsub):
     """ Compute the median distance to the nuclei the edges of each cell, for all cells profiled

@@ -36,3 +36,7 @@ env/
 # Output directories
 xenium-output/
 output/
+results/
+
+# Docker env
+docker/.env

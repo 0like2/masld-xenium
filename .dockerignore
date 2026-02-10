@@ -1,0 +1,45 @@
+# Data files
+data/
+*.h5ad
+*.parquet
+*.ome.tif
+*.tiff
+*.gz
+*.tar.gz
+*.rds
+
+# Output directories
+xenium-output/
+output/
+results/
+figures/
+
+# Python environments
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+
+# Notebooks & docs
+notebooks/
+*.ipynb
+.ipynb_checkpoints/
+
+# xb package (pipeline is self-contained)
+xb/
+setup.py
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
+
+# Docker
+docker/.env

@@ -5,6 +5,7 @@
 
 import os
 import sys
+import argparse
 import yaml
 import logging
 from pathlib import Path
@@ -20,6 +21,7 @@ import xenium_step2_segmentation_free_analysis as step2
 import xenium_step3_resegmentation as step3
 import xenium_step4_techniques_comparison as step4
 import xenium_step5_optimal_expansion as step5
+import xenium_step6_segmentation_benchmark as step6
 import xenium_step7_simulation as step7
 
 # Configure Logging
@@ -43,7 +45,11 @@ def main():
 
 
     # --- 1. Load Config ---
-    config_path = os.path.join(current_dir, "config.yaml")
+    parser = argparse.ArgumentParser(description="MASLD Xenium Pipeline")
+    parser.add_argument("--config", default=os.path.join(current_dir, "config.yaml"),
+                        help="Path to config YAML file")
+    args = parser.parse_args()
+    config_path = args.config
     if not os.path.exists(config_path):
         logger.error(f"Config file not found at {config_path}")
         return
@@ -306,7 +312,6 @@ def main():
         print("Step 6 output already exists. Skipping...")
     else:
         try:
-            import xenium_step6_segmentation_benchmark as step6
             step6.run_step6(step6_config)
             with open(step6_marker, "w") as f:
                 f.write("done")

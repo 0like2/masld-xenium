@@ -11,6 +11,7 @@ sample_tag: "human_alzheimers"
 
 baysor:
   enabled: true
+  dry_run: false  # Set true to simulate Baysor execution (no actual run)
   executable_path: "/usr/local/bin/baysor" # Path to baysor binary
   params:
     scale: 50
@@ -22,6 +23,7 @@ baysor:
 formatting:
   mincounts: 10
   mingenes: 3
+  filter_nuclei_only: false  # If true, keep only transcripts with overlaps_nucleus=1 (matches notebook 0_3)
 
 # Step 1 (New): Exploration Parameters
 exploration:
@@ -35,7 +37,8 @@ exploration:
 segmentation_free:
   run_points2regions: true
   run_ssam: false
-  run_overlaps: true
+  run_overlaps: false  # Changed default: ovrlpy not fully implemented
+  distance_metric: "centroid"  # "centroid" (notebook default), "boundary", or "both"
   
   points2regions:
     sigma: 3.0
@@ -61,7 +64,8 @@ comparison:
   run_specificity: true
   run_positivity: true  # New: Moved from Resegmentation
   run_diffusion: true   # New: Moved from Resegmentation
-  
+  technology: "xenium"  # For pixel-to-um conversion: xenium|cosmx|vizgen|merfish|hybriss|resolvedbio
+
   # Optional: Comparison with other datasets
   visium_path: null
   sc_reference_path: null # Path to scRNAseq reference .h5ad for Specificity (NMP) analysis
@@ -71,7 +75,7 @@ resegmentation:
   run_resegmentation: false
   
   cellpose:
-    use_gpu: false
+    # use_gpu: auto-detected (CUDA > MPS > CPU)
     model_type: 'nuclei'
     diameter: null # Auto-detect if null
     channels: [0, 0] # Grayscale
@@ -86,6 +90,22 @@ optimal_expansion:
   run_expansion: false
   subsample_fraction: 0.01  # Fraction of assigned cells to use for KDTree speedup (Ref: 4_1 notebook)
   distance_threshold: null  # Optional max distance (null = assigning to nearest regardless of dist)
+  min_reads_per_domain: 5000  # Min transcripts per domain to include in turnover analysis
+  diff_threshold: 0.1  # Correlation diff threshold to detect turnover point
+
+# Step 6: Benchmark Preprocessing (matches notebook defaults)
+benchmark:
+  preprocessing:
+    target_sum: 100
+    min_counts: 40
+    min_genes: 15
+    n_neighbors: 15
+    n_pcs: 0  # 0 = use all PCs
+    umap_min_dist: 0.1
+    resolution: 1.0
+    scale: false
+  reference_adata: null  # Path to reference .h5ad for annotation transfer
+  ref_celltype_key: "celltype"  # Column in reference adata for cell type labels
 
 # Step 7: Simulation & Preprocessing
 simulation:
@@ -99,9 +119,24 @@ simulation:
   noise_percentage: 10.0 # %
   missegmentation_percentage: 10.0 # %
   
+  # Dataset Filtering
+  max_cells: 20000
+  min_celltypes: 2
+  max_celltypes: 30
+
   # Assessment Parameters
   n_permutations: 30 # Number of preprocessing combinations to test
   reference_key: "cell_type" # Column in scRNAseq to use as ground truth
+
+  # Preprocessing Grid (expanded to ~50 combinations)
+  preprocessing_grid:
+    normalize: [true, false]
+    target_sum: [100, 1000, 10000]
+    scale: [true, false]
+    hvg: [true, false]
+    n_neighbors: [10, 15, 30]
+    n_pcs: [15, 30, 50]
+    resolution: [0.5, 1.0, 1.5]
 
 # Step 2 (Original -> Deferred): Preprocessing Parameters
 preprocessing:

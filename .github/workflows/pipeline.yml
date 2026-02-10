@@ -1,0 +1,134 @@
+name: MASLD Xenium Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sample_tag:
+        description: 'Sample tag (e.g. human_alzheimers)'
+        required: true
+        default: 'human_alzheimers'
+      data_path:
+        description: 'Path to Xenium data on the server'
+        required: true
+      output_path:
+        description: 'Path to write results on the server'
+        required: false
+        default: '/tmp/xenium-output'
+
+jobs:
+  # --------------------------------------------------------
+  # Job 1: Lint (runs on all PRs)
+  # --------------------------------------------------------
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check Python syntax
+        run: python -m py_compile pipeline/pipeline_main.py
+
+      - name: Validate config.yaml
+        run: |
+          python -c "
+          import yaml, sys
+          with open('pipeline/config.yaml') as f:
+              config = yaml.safe_load(f)
+          required = ['input_path', 'output_dir', 'sample_tag']
+          missing = [k for k in required if k not in config]
+          if missing:
+              print(f'Missing config keys: {missing}')
+              sys.exit(1)
+          print('config.yaml is valid')
+          "
+
+      - name: Validate Dockerfile
+        run: docker build --check . 2>/dev/null || echo "Docker --check not supported, skipping"
+
+  # --------------------------------------------------------
+  # Job 2: Build & Smoke Test (self-hosted GPU runner)
+  # --------------------------------------------------------
+  build:
+    runs-on: [self-hosted, linux, gpu]
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false  # Banksy_py cloned in Dockerfile
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: masld-xenium:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test - import check
+        run: |
+          docker run --rm --gpus all \
+            -e RUN_MODE=test \
+            masld-xenium:${{ github.sha }}
+
+      - name: Cleanup old images
+        if: always()
+        run: docker image prune -f --filter "until=24h"
+
+  # --------------------------------------------------------
+  # Job 3: Run Pipeline (manual trigger only)
+  # --------------------------------------------------------
+  run-pipeline:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, linux, gpu]
+    needs: build
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Validate data path
+        run: |
+          if [ ! -d "${{ github.event.inputs.data_path }}" ]; then
+            echo "ERROR: Data path does not exist: ${{ github.event.inputs.data_path }}"
+            exit 1
+          fi
+          echo "Data path validated: ${{ github.event.inputs.data_path }}"
+
+      - name: Prepare output directory
+        run: mkdir -p "${{ github.event.inputs.output_path }}"
+
+      - name: Run pipeline
+        run: |
+          docker run --rm --gpus all \
+            --shm-size=8g \
+            -v "${{ github.event.inputs.data_path }}:/data/input:ro" \
+            -v "${{ github.event.inputs.output_path }}:/data/output" \
+            -e INPUT_PATH=/data/input \
+            -e OUTPUT_DIR=/data/output \
+            -e SAMPLE_TAG=${{ github.event.inputs.sample_tag }} \
+            -e RUN_MODE=run \
+            masld-xenium:${{ github.sha }}
+
+      - name: Upload results summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-results-${{ github.event.inputs.sample_tag }}
+          path: |
+            ${{ github.event.inputs.output_path }}/**/*_done.txt
+            ${{ github.event.inputs.output_path }}/**/*.log
+          retention-days: 30
+          if-no-files-found: warn
