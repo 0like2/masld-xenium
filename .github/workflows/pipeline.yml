@@ -32,6 +32,9 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install dependencies
+        run: pip install PyYAML
+
       - name: Check Python syntax
         run: python -m py_compile pipeline/pipeline_main.py
 
