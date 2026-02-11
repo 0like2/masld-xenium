@@ -81,7 +81,7 @@ jobs:
 
       - name: Smoke test - import check
         run: |
-          docker run --rm --gpus all \
+          docker run --rm \
             -e RUN_MODE=test \
             masld-xenium:${{ github.sha }}
 
