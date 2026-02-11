@@ -61,9 +61,14 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools
 
 # Install Baysor pre-built binary
-RUN wget --retry-connrefused --waitretry=5 --tries=3 -O /usr/local/bin/baysor \
-    https://github.com/kharchenkolab/Baysor/releases/download/v0.7.1/baysor-v0.7.1-x86_64-linux-gnu \
-    && chmod +x /usr/local/bin/baysor
+RUN apt-get update && apt-get install -y --no-install-recommends unzip \
+    && rm -rf /var/lib/apt/lists/* && \
+    wget --retry-connrefused --waitretry=5 --tries=3 -O /tmp/baysor.zip \
+    https://github.com/kharchenkolab/Baysor/releases/download/v0.7.1/baysor-x86_x64-linux-v0.7.1_build.zip && \
+    unzip -q /tmp/baysor.zip -d /tmp/baysor_extracted && \
+    find /tmp/baysor_extracted -type f -name "baysor" -executable | head -1 | xargs -I {} cp {} /usr/local/bin/baysor && \
+    chmod +x /usr/local/bin/baysor && \
+    rm -rf /tmp/baysor.zip /tmp/baysor_extracted
 
 # Install wheels from builder stage
 COPY --from=builder /build/wheels /tmp/wheels
