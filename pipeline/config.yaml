@@ -4,7 +4,9 @@
 # ------------------------------------------------------------
 
 # Input/Output Settings
-input_path: "/Users/iyeonglag/PycharmProjects/masld-xenium/data/Xenium_V1_FFPE_Human_Brain_Alzheimers_With_Addon_outs"
+# Local Mac path (for development):
+# input_path: "/Users/iyeonglag/PycharmProjects/masld-xenium/data/Xenium_V1_FFPE_Human_Brain_Alzheimers_With_Addon_outs"
+input_path: "/data/project/lyrak/masld-xenium/data/Xenium_V1_FFPE_Human_Brain_Alzheimers_With_Addon_outs"
 input_advanced: "xenium-output/cellpose_output/segments_cellpose.tif"  # Example path
 output_dir: "xenium-output"
 sample_tag: "human_alzheimers"
@@ -12,7 +14,7 @@ sample_tag: "human_alzheimers"
 baysor:
   enabled: true
   dry_run: false  # Set true to simulate Baysor execution (no actual run)
-  executable_path: "/usr/local/bin/baysor" # Path to baysor binary
+  executable_path: "/usr/local/bin/baysor" # Path to baysor binary; on server: adjust to actual installation path
   params:
     scale: 50
     min_molecules_per_cell: 10
@@ -75,13 +77,16 @@ comparison:
     min_counts: 10        # Cell filtering: min transcripts per cell
     min_genes: 3          # Cell filtering: min genes per cell
 
+  # Efficiency analysis: minimum reads per cell to count as expressing (notebook default: 1)
+  efficiency_minreads: 1
+
   # Optional: Comparison with other datasets
   visium_path: null
   sc_reference_path: null # Path to scRNAseq reference .h5ad for Specificity (NMP) analysis
 
 # Step 4: Resegmentation (Cellpose)
 resegmentation:
-  run_resegmentation: false
+  run_resegmentation: true
   expansion_distance: 400  # Pixels to expand nuclei masks (notebook default: 400). Set 0 to disable.
   um_per_pixel_inv: 4.70588  # Pixel-to-µm factor for cell area conversion (Xenium default)
 
@@ -98,7 +103,7 @@ resegmentation:
 
 # Step 5: Optimal Expansion
 optimal_expansion:
-  run_expansion: false
+  run_expansion: true
   subsample_fraction: 0.01  # Fraction of assigned cells to use for KDTree speedup (Ref: 4_1 notebook)
   distance_threshold: null  # Optional max distance (null = assigning to nearest regardless of dist)
   min_reads_per_domain: 5000  # Min transcripts per domain to include in turnover analysis

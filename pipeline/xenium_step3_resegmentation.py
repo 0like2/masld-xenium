@@ -77,14 +77,9 @@ def run_step3(config, dapi_image_path, transcripts_path, output_dir):
     # --- 3-1. Device detection (CUDA/MPS/CPU) ---
     device, use_gpu = _detect_device()
     print(f"Initializing Cellpose (device={device}, model='nuclei')...")
-    model = models.CellposeModel(gpu=use_gpu, model_type='nuclei', device=device)
+    model = models.CellposeModel(gpu=use_gpu, pretrained_model='nuclei', device=device)
 
-    tile_size = 2000
-    if dapi_image.shape[0] > tile_size or dapi_image.shape[1] > tile_size:
-        print("Image larger than tile size. Running standard Cellpose eval (handles tiling internally)...")
-        masks, flows, styles, diams = model.eval(dapi_image, diameter=diameter, channels=[0,0], tile=True)
-    else:
-        masks, flows, styles, diams = model.eval(dapi_image, diameter=diameter, channels=[0,0])
+    masks, flows, styles = model.eval(dapi_image, diameter=diameter)
 
     del dapi_image, flows, styles
     gc.collect()
@@ -207,6 +202,26 @@ def run_step3(config, dapi_image_path, transcripts_path, output_dir):
         n_in_nuclei = (df_assigned['in_cell'] > 0).sum()
         n_in_expanded = (df_assigned['closest_cell'] > 0).sum()
         print(f"  > In nuclei: {n_in_nuclei}, In expanded cells: {n_in_expanded}")
+
+    # C1-a: Mask + transcript scatter overlay
+    try:
+        from skimage.color import label2rgb
+        sample_tag_vis = config.get('sample_tag', 'sample')
+        sub = df_assigned.sample(n=min(len(df_assigned), 50000), random_state=42)
+        step_ds = max(1, masks.shape[0] // 2000)
+        fig, ax = plt.subplots(figsize=(10, 10))
+        ax.imshow(label2rgb(masks[::step_ds, ::step_ds], bg_label=0), interpolation='nearest', alpha=0.4)
+        ax.scatter(sub[x_col].values / step_ds, sub[y_col].values / step_ds,
+                   s=0.2, alpha=0.3, c='white', rasterized=True)
+        ax.set_title(f'Mask + transcript overlay ({len(sub)} transcripts)')
+        ax.axis('off')
+        fig.tight_layout()
+        fig.savefig(os.path.join(output_dir, f"{sample_tag_vis}_step3_mask_transcript_overlay.png"), dpi=150)
+        plt.close(fig)
+        print("  > Mask + transcript overlay saved.")
+    except Exception as e:
+        print(f"  > Warning: mask + transcript overlay failed: {e}")
+        plt.close('all')
 
     # --- 3-6a. Extract cell centroids + morphology (regionprops) ---
     # Compute regionprops BEFORE AnnData creation so centroids are available for distance_to_centroid
@@ -339,6 +354,42 @@ def run_step3(config, dapi_image_path, transcripts_path, output_dir):
                         count_assigned += 1
 
             print(f"  > Domain Assignment Complete. Assigned {count_assigned} cells.")
+
+            # C1-b: Domain polygon + centroid overlay
+            try:
+                fig, ax = plt.subplots(figsize=(10, 10))
+                regions_assigned = adata.obs['region_annotation'].unique()
+                cmap_dom = plt.cm.get_cmap('tab20', len(regions_assigned))
+                color_map = {r: cmap_dom(i) for i, r in enumerate(sorted(regions_assigned))}
+                for r in sorted(regions_assigned):
+                    mask_r = adata.obs['region_annotation'] == r
+                    ax.scatter(adata.obs.loc[mask_r, 'x_centroid'],
+                               adata.obs.loc[mask_r, 'y_centroid'],
+                               s=0.5, alpha=0.5, color=color_map[r], label=str(r), rasterized=True)
+                # Overlay domain polygon outlines
+                for region in domain_data:
+                    rname = region.get('name', 'Unknown')
+                    if 'coordinates' not in region or not region['coordinates']:
+                        continue
+                    raw_c = region['coordinates'][0]
+                    # Polygon coords are (y, x) — plot as (x, y)
+                    xs = [pt[1] for pt in raw_c] + [raw_c[0][1]]
+                    ys = [pt[0] for pt in raw_c] + [raw_c[0][0]]
+                    ax.plot(xs, ys, linewidth=1, alpha=0.8,
+                            color=color_map.get(rname, 'gray'))
+                ax.set_aspect('equal')
+                ax.invert_yaxis()
+                ax.set_title('Domain Polygons + Cell Centroids')
+                ax.legend(markerscale=10, fontsize=7, loc='center left', bbox_to_anchor=(1, 0.5))
+                fig.tight_layout()
+                sample_tag_dom = config.get('sample_tag', 'sample')
+                fig.savefig(os.path.join(output_dir, f"{sample_tag_dom}_step3_domain_polygon_overlay.png"),
+                            dpi=150, bbox_inches='tight')
+                plt.close(fig)
+                print("  > Domain polygon + centroid overlay saved.")
+            except Exception as e:
+                print(f"  > Warning: domain polygon overlay failed: {e}")
+                plt.close('all')
 
             print(f"Saving AnnData with Domains to {adata_out_path}...")
             adata.write(adata_out_path)

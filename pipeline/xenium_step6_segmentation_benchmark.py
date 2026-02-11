@@ -95,6 +95,15 @@ def run_baysor(config, xenium_input_dir):
     params = baysor_conf.get("params", {})
     dry_run = baysor_conf.get("dry_run", False)
 
+    # Early check: skip data prep if Baysor binary is missing (unless dry_run)
+    if not dry_run and not shutil.which(executable):
+        logger.error(
+            f"Baysor binary not found at '{executable}'. "
+            "Install Baysor or set baysor.executable_path in config. "
+            "To skip execution, set baysor.dry_run=True."
+        )
+        return None
+
     step6_out = config.get("output_dir", "xenium-output/step6_benchmark")
     baysor_out_dir = os.path.join(step6_out, "baysor_run")
     os.makedirs(baysor_out_dir, exist_ok=True)
@@ -149,14 +158,6 @@ def run_baysor(config, xenium_input_dir):
         return segmentation_csv
 
     # --- Real execution ---
-    if not shutil.which(executable):
-        logger.error(
-            f"Baysor binary not found at '{executable}'. "
-            "Install Baysor or set baysor.executable_path in config. "
-            "To skip execution, set baysor.dry_run=True."
-        )
-        return None
-
     try:
         subprocess.run(cmd, check=True)
         logger.info("Baysor executed successfully.")
@@ -184,15 +185,14 @@ def load_transcripts_as_adata(csv_path, cell_col='cell', gene_col='gene',
     try:
         df = pd.read_csv(csv_path)
 
-        # Resolve column names (multiple naming conventions)
+        # Resolve column names — prefer expansion assignment (closest_cell)
+        # over nuclei (in_cell) over user-specified over defaults
         cols = df.columns
         actual_cell_col = None
-        if cell_col in cols:
-            actual_cell_col = cell_col
-        elif 'cell_id' in cols:
-            actual_cell_col = 'cell_id'
-        elif 'cell' in cols:
-            actual_cell_col = 'cell'
+        for candidate in ['closest_cell', 'in_cell', cell_col, 'cell_id', 'cell']:
+            if candidate in cols:
+                actual_cell_col = candidate
+                break
 
         actual_gene_col = None
         if gene_col in cols:
@@ -223,8 +223,13 @@ def load_transcripts_as_adata(csv_path, cell_col='cell', gene_col='gene',
         adata.var_names_make_unique()
         adata.obs_names_make_unique()
 
-        # Store raw spots for proportion_of_assigned_reads (needs total transcript count)
-        adata.uns['spots'] = df[[actual_cell_col, actual_gene_col]].copy()
+        # Store raw spots for proportion_of_assigned_reads + Rand Index
+        # Preserve coordinate columns if available for spatial matching
+        keep_cols = [actual_cell_col, actual_gene_col]
+        for coord_candidate in ['x_location', 'y_location', 'x_global_px', 'y_global_px', 'x', 'y']:
+            if coord_candidate in cols:
+                keep_cols.append(coord_candidate)
+        adata.uns['spots'] = df[list(dict.fromkeys(keep_cols))].copy()
 
         return adata
 
@@ -359,15 +364,97 @@ def preprocess_benchmark(adata, config):
 
 # --- 6-6. Visualizations ---
 
+# --- 6-6-pre. QC plots after preprocessing ---
+def _save_qc_histograms(adata, output_dir):
+    """C3-1: Cell counts/genes histograms with filtering threshold lines."""
+    try:
+        raw_X = adata.layers['raw'] if 'raw' in adata.layers else adata.X
+        if issparse(raw_X):
+            total_counts = np.asarray(raw_X.sum(axis=1)).flatten()
+            n_genes = np.asarray((raw_X > 0).sum(axis=1)).flatten()
+        else:
+            total_counts = np.sum(raw_X, axis=1)
+            n_genes = np.sum(raw_X > 0, axis=1)
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        axes[0].hist(total_counts, bins=50, edgecolor='black', alpha=0.7)
+        axes[0].set_title('Total Counts per Cell')
+        axes[0].set_xlabel('Counts')
+        axes[0].set_ylabel('Frequency')
+
+        axes[1].hist(n_genes, bins=50, edgecolor='black', alpha=0.7, color='orange')
+        axes[1].set_title('Genes Detected per Cell')
+        axes[1].set_xlabel('Number of Genes')
+        axes[1].set_ylabel('Frequency')
+
+        fig.tight_layout()
+        out_path = os.path.join(output_dir, "qc_counts_genes_histogram.png")
+        fig.savefig(out_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        logger.info(f"Saved QC histograms to {out_path}")
+    except Exception as e:
+        logger.warning(f"QC histograms failed: {e}")
+        plt.close('all')
+
+
+def _save_hvg_plot(adata, output_dir):
+    """C3-2: HVG selection plot."""
+    try:
+        if 'highly_variable' not in adata.var.columns:
+            logger.info("No HVG column found; skipping HVG plot.")
+            return
+        sc.pl.highly_variable_genes(adata, show=False)
+        out_path = os.path.join(output_dir, "hvg_selection_plot.png")
+        plt.savefig(out_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        logger.info(f"Saved HVG plot to {out_path}")
+    except Exception as e:
+        logger.warning(f"HVG plot failed: {e}")
+        plt.close('all')
+
+
+def _save_pca_scree(adata, output_dir):
+    """C3-3: PCA scree plot (variance explained)."""
+    try:
+        if 'pca' not in adata.uns:
+            logger.info("No PCA results found; skipping scree plot.")
+            return
+        variance_ratio = adata.uns['pca']['variance_ratio']
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.plot(range(1, len(variance_ratio) + 1), np.cumsum(variance_ratio), 'o-', markersize=3)
+        ax.set_xlabel('PC')
+        ax.set_ylabel('Cumulative Variance Explained')
+        ax.set_title('PCA Scree Plot')
+        ax.axhline(y=0.9, color='red', linestyle='--', alpha=0.5, label='90%')
+        ax.legend()
+        fig.tight_layout()
+        out_path = os.path.join(output_dir, "pca_scree_plot.png")
+        fig.savefig(out_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        logger.info(f"Saved PCA scree plot to {out_path}")
+    except Exception as e:
+        logger.warning(f"PCA scree plot failed: {e}")
+        plt.close('all')
+
+
 # --- 6-6a. UMAP per method ---
 def _save_umap(adata, output_dir):
-    """UMAP coloured by segmentation method and Leiden cluster."""
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    """UMAP coloured by segmentation method, Leiden cluster, and cell type (if available)."""
+    n_panels = 2
+    ct_key = 'celltype_majority'
+    has_ct = ct_key in adata.obs.columns
+    if has_ct:
+        n_panels = 3
+
+    fig, axes = plt.subplots(1, n_panels, figsize=(8 * n_panels, 6))
 
     sc.pl.umap(adata, color='segmentation', ax=axes[0], show=False,
                title='Segmentation method', frameon=False)
     sc.pl.umap(adata, color='leiden', ax=axes[1], show=False,
                title='Leiden clusters', frameon=False)
+    if has_ct:
+        sc.pl.umap(adata, color=ct_key, ax=axes[2], show=False,
+                    title='Cell type', frameon=False)
 
     fig.tight_layout()
     out_path = os.path.join(output_dir, "umap_benchmark.png")
@@ -562,6 +649,80 @@ def _save_spatial_celltype_map(adata, output_dir, ct_key='celltype_majority'):
     logger.info(f"Saved spatial cell type map to {out_path}")
 
 
+# --- 6-5b. Rand Index between segmentation methods ---
+
+def _compute_rand_index(adata_list, method_names, output_dir):
+    """Compute pairwise Rand Index between segmentation methods using transcript-level assignments.
+
+    Matches transcripts across methods by (x, y) coordinates, then calls
+    metrics.rand_idx() on the aligned assignment matrix.
+    """
+    if len(adata_list) < 2:
+        logger.info("Rand Index requires >=2 methods; skipping.")
+        return
+
+    # Build per-method transcript→cell DataFrames keyed by (x, y)
+    dfs = {}
+    for ad, name in zip(adata_list, method_names):
+        if 'spots' not in ad.uns:
+            logger.warning(f"Rand Index: 'spots' missing for '{name}'; skipping.")
+            return
+        spots = ad.uns['spots']
+        # Find coordinate columns
+        x_col = y_col = cell_col = None
+        for xc, yc in [('x_location', 'y_location'), ('x_global_px', 'y_global_px'), ('x', 'y')]:
+            if xc in spots.columns and yc in spots.columns:
+                x_col, y_col = xc, yc
+                break
+        if x_col is None:
+            logger.warning(f"Rand Index: no coordinate columns in spots for '{name}'; skipping.")
+            return
+        cell_col = [c for c in spots.columns if c not in [x_col, y_col]][0]
+        df = spots[[x_col, y_col, cell_col]].copy()
+        df.columns = ['x', 'y', name]
+        df['x'] = df['x'].round(3)
+        df['y'] = df['y'].round(3)
+        dfs[name] = df
+
+    # Merge all methods on coordinates
+    names = list(dfs.keys())
+    merged = dfs[names[0]]
+    for n in names[1:]:
+        merged = merged.merge(dfs[n], on=['x', 'y'], how='inner')
+
+    if len(merged) < 100:
+        logger.warning(f"Rand Index: only {len(merged)} matched transcripts; skipping.")
+        return
+
+    logger.info(f"Rand Index: {len(merged)} matched transcripts across {len(names)} methods.")
+    assignments = merged[names].fillna(0)
+
+    try:
+        rand_matrix = metrics.rand_idx(assignments)
+        rand_matrix.index = names
+        rand_matrix.columns = names
+
+        # Save CSV
+        csv_path = os.path.join(output_dir, "rand_index_matrix.csv")
+        rand_matrix.to_csv(csv_path)
+        logger.info(f"Saved Rand Index matrix to {csv_path}")
+
+        # Heatmap
+        fig, ax = plt.subplots(figsize=(max(6, len(names) * 1.5), max(5, len(names) * 1.2)))
+        import seaborn as sns
+        sns.heatmap(rand_matrix.astype(float), annot=True, fmt='.3f',
+                    cmap='YlOrRd', vmin=0, vmax=1, square=True, ax=ax)
+        ax.set_title("Adjusted Rand Index between Segmentation Methods")
+        fig.tight_layout()
+        fig_path = os.path.join(output_dir, "rand_index_heatmap.png")
+        fig.savefig(fig_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        logger.info(f"Saved Rand Index heatmap to {fig_path}")
+    except Exception as e:
+        logger.warning(f"Rand Index computation failed: {e}")
+        plt.close('all')
+
+
 # --- Entry Point ---
 
 def run_step6(config):
@@ -621,12 +782,24 @@ def run_step6(config):
         logger.error("No valid input datasets found for benchmarking.")
         return
 
+    # --- 6-2b. Rand Index (before concat, needs per-method spots) ---
+    try:
+        method_names = [ad.obs['segmentation'].iloc[0] for ad in adata_list]
+        _compute_rand_index(adata_list, method_names, output_dir)
+    except Exception as e:
+        logger.warning(f"Rand Index step failed: {e}")
+
     # --- 6-3. Concatenate & preprocess ---
     logger.info(f"Concatenating {len(adata_list)} datasets for comparison...")
     adata = sc.concat(adata_list)
 
     logger.info("Preprocessing and Clustering...")
     adata = preprocess_benchmark(adata, config)
+
+    # --- 6-3b. QC visualizations (C3-1, C3-2, C3-3) ---
+    _save_qc_histograms(adata, output_dir)
+    _save_hvg_plot(adata, output_dir)
+    _save_pca_scree(adata, output_dir)
 
     # --- 6-4. Annotation transfer ---
     ref_adata_path = config.get("benchmark", {}).get("reference_adata")
@@ -769,6 +942,20 @@ def run_step6(config):
         except Exception as e:
             logger.warning(f"Celltype marker gene ranking failed: {e}")
             plt.close('all')
+
+    # C3-4: DEG dotplot per cluster
+    try:
+        if 'rank_genes_segmentation' in adata.uns:
+            sc.pl.rank_genes_groups_dotplot(
+                adata, key='rank_genes_segmentation', n_genes=5,
+                show=False, save=False)
+            dotplot_path = os.path.join(output_dir, "deg_dotplot_by_segmentation.png")
+            plt.savefig(dotplot_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            logger.info(f"Saved DEG dotplot: {dotplot_path}")
+    except Exception as e:
+        logger.warning(f"DEG dotplot failed: {e}")
+        plt.close('all')
 
     # --- 6-6. Visualizations ---
     logger.info("Generating visualizations...")

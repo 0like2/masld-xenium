@@ -33,11 +33,15 @@ from tqdm import tqdm
 
 # --- Self-contained NMP/co-expression functions (originally from xb/calculating.py) ---
 
-def _coexpression_calculation(exp, min_exp=0):
+def _coexpression_calculation(exp, min_exp=0, min_cells=10):
     """Gene-gene co-expression matrix: fraction of positive cells per gene pair."""
     coexpression = pd.DataFrame(index=exp.columns, columns=exp.columns)
     for col in tqdm(exp.columns):
         sel = exp.loc[:, col] > min_exp
+        n_expressing = sel.sum()
+        if n_expressing < min_cells:
+            coexpression.loc[:, col] = np.nan
+            continue
         positive_cells = exp.loc[sel, :]
         coexpression.loc[:, col] = np.sum(positive_cells > min_exp) / positive_cells.shape[0]
     coexpression = coexpression.fillna(1)
@@ -156,6 +160,34 @@ def run_step4(config, adata_path, transcripts_path, output_dir, original_adata_p
     sample_tag = config.get('sample_tag', 'sample')
     technology = comp_config.get('technology', 'xenium').lower()
 
+    # --- C2-a. Spatial ROI map (cells colored by region) ---
+    try:
+        region_col = None
+        for candidate in ['region_annotation', 'spatial_annotation', 'region', 'tissue_region', 'domain']:
+            if candidate in adata_reseg.obs.columns:
+                region_col = candidate
+                break
+        if region_col and 'x_centroid' in adata_reseg.obs.columns and 'y_centroid' in adata_reseg.obs.columns:
+            fig, ax = plt.subplots(figsize=(10, 10))
+            regions = adata_reseg.obs[region_col].unique()
+            cmap = plt.cm.get_cmap('tab20', len(regions))
+            for i, r in enumerate(sorted(regions)):
+                mask = adata_reseg.obs[region_col] == r
+                ax.scatter(adata_reseg.obs.loc[mask, 'x_centroid'],
+                           adata_reseg.obs.loc[mask, 'y_centroid'],
+                           s=0.5, alpha=0.5, color=cmap(i), label=str(r), rasterized=True)
+            ax.set_aspect('equal')
+            ax.invert_yaxis()
+            ax.set_title('Spatial ROI Map (cells by region)')
+            ax.legend(markerscale=10, fontsize=7, loc='center left', bbox_to_anchor=(1, 0.5))
+            fig.tight_layout()
+            fig.savefig(os.path.join(figs_dir, 'spatial_roi_map.png'), dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            print("  > Spatial ROI map saved.")
+    except Exception as e:
+        print(f"  > Spatial ROI map failed: {e}")
+        plt.close('all')
+
     # --- 4-2. Efficiency analysis ---
     if run_efficiency:
         print("Running Efficiency Analysis...")
@@ -252,30 +284,51 @@ def analyze_efficiency(adata_reseg, output_dir, adata_orig=None, comp_config=Non
     pd.DataFrame(stats_list).to_csv(os.path.join(output_dir, 'efficiency_metrics_comparison.csv'), index=False)
     print(f"  > Efficiency comparison saved to {output_dir}")
 
-    # --- 4-2b. Expression ratio (ST vs scRNAseq, CPM) ---
-    # ratio = ST_expression / scRNAseq_expression (both CPM-normalized)
+    # --- 4-2b. Expression ratio (ST_mean / scRNA_median, raw counts, notebook method) ---
     sc_ref_path = comp_config.get('sc_reference_path')
+    minreads = comp_config.get('efficiency_minreads', 1)
     if sc_ref_path and os.path.exists(sc_ref_path):
-        print("  > scRNAseq reference found. Computing per-gene expression ratio (ST / scRNAseq)...")
+        print(f"  > scRNAseq reference found. Computing per-gene expression ratio (raw, minreads={minreads})...")
         try:
             adata_sc = sc.read_h5ad(sc_ref_path)
-            ad_st = adata_reseg.copy()
-            sc.pp.normalize_total(ad_st, target_sum=1e6)
-            ad_ref = adata_sc.copy()
-            sc.pp.normalize_total(ad_ref, target_sum=1e6)
 
-            common_genes = list(set(ad_st.var_names) & set(ad_ref.var_names))
+            # Use raw counts (no CPM) — notebook method
+            ad_st_raw = adata_reseg.copy()
+            if 'raw' in ad_st_raw.layers:
+                ad_st_raw.X = ad_st_raw.layers['raw'].copy()
+            ad_ref_raw = adata_sc.copy()
+            if 'raw' in ad_ref_raw.layers:
+                ad_ref_raw.X = ad_ref_raw.layers['raw'].copy()
+
+            common_genes = sorted(set(ad_st_raw.var_names) & set(ad_ref_raw.var_names))
             if len(common_genes) > 0:
-                st_mean = np.array(ad_st[:, common_genes].X.mean(axis=0)).flatten()
-                ref_mean = np.array(ad_ref[:, common_genes].X.mean(axis=0)).flatten()
+                X_st = ad_st_raw[:, common_genes].X
+                X_sc = ad_ref_raw[:, common_genes].X
+                if hasattr(X_st, 'toarray'):
+                    X_st = X_st.toarray()
+                if hasattr(X_sc, 'toarray'):
+                    X_sc = X_sc.toarray()
 
-                ref_mean_safe = np.where(ref_mean > 0, ref_mean, np.nan)
-                ratio = st_mean / ref_mean_safe
+                # Per-gene: ST mean over expressing cells, scRNA median over expressing cells
+                st_means = []
+                sc_medians = []
+                for gi in range(len(common_genes)):
+                    st_col = X_st[:, gi]
+                    sc_col = X_sc[:, gi]
+                    st_expr = st_col[st_col >= minreads]
+                    sc_expr = sc_col[sc_col >= minreads]
+                    st_means.append(np.mean(st_expr) if len(st_expr) > 0 else 0.0)
+                    sc_medians.append(np.median(sc_expr) if len(sc_expr) > 0 else 0.0)
+
+                st_means = np.array(st_means)
+                sc_medians = np.array(sc_medians)
+                sc_medians_safe = np.where(sc_medians > 0, sc_medians, np.nan)
+                ratio = st_means / sc_medians_safe
 
                 df_ratio = pd.DataFrame({
                     'gene': common_genes,
-                    'st_mean_cpm': st_mean,
-                    'sc_mean_cpm': ref_mean,
+                    'st_mean_raw': st_means,
+                    'sc_median_raw': sc_medians,
                     'expression_ratio': ratio,
                 }).dropna().sort_values('expression_ratio', ascending=False)
 
@@ -284,12 +337,35 @@ def analyze_efficiency(adata_reseg, output_dir, adata_orig=None, comp_config=Non
                 plt.figure(figsize=(8, 6))
                 plt.hist(df_ratio['expression_ratio'].clip(upper=5), bins=50, edgecolor='black')
                 plt.axvline(x=1.0, color='red', linestyle='--', label='Ratio = 1')
-                plt.title('Per-Gene Expression Ratio (ST / scRNAseq)')
+                plt.title('Per-Gene Expression Ratio (ST mean / scRNA median, raw)')
                 plt.xlabel('Expression Ratio (clipped at 5)')
                 plt.ylabel('Number of Genes')
                 plt.legend()
                 plt.savefig(os.path.join(output_dir, 'efficiency_expression_ratio.png'))
                 plt.close()
+
+                # C2-b: ST vs scRNAseq expression scatter (log-log + identity line)
+                try:
+                    fig, ax = plt.subplots(figsize=(8, 8))
+                    mask_pos = (df_ratio['st_mean_raw'] > 0) & (df_ratio['sc_median_raw'] > 0)
+                    df_pos = df_ratio[mask_pos]
+                    ax.scatter(np.log10(df_pos['sc_median_raw']), np.log10(df_pos['st_mean_raw']),
+                               s=10, alpha=0.5, edgecolors='none')
+                    lims = [min(ax.get_xlim()[0], ax.get_ylim()[0]),
+                            max(ax.get_xlim()[1], ax.get_ylim()[1])]
+                    ax.plot(lims, lims, 'r--', alpha=0.7, label='identity')
+                    ax.set_xlabel('log10(scRNA median, raw)')
+                    ax.set_ylabel('log10(ST mean, raw)')
+                    ax.set_title('ST vs scRNAseq Expression (log-log)')
+                    ax.legend()
+                    fig.tight_layout()
+                    fig.savefig(os.path.join(output_dir, 'efficiency_st_vs_sc_scatter.png'), dpi=150)
+                    plt.close(fig)
+                    print("  > ST vs scRNAseq scatter saved.")
+                except Exception as e:
+                    print(f"  > ST vs scRNAseq scatter failed: {e}")
+                    plt.close('all')
+
                 print(f"  > Expression ratio analysis saved ({len(df_ratio)} common genes).")
             else:
                 print("  > No common genes found between ST and scRNAseq reference.")
@@ -335,8 +411,59 @@ def analyze_efficiency(adata_reseg, output_dir, adata_orig=None, comp_config=Non
             print(f"  > Region-based efficiency saved.")
         except Exception as e:
             print(f"  > Error in region-based efficiency: {e}")
+
+        # C2-c: Region-specific expression ratio boxplot (log2 scale)
+        ratio_path = os.path.join(output_dir, 'efficiency_expression_ratio.csv')
+        if os.path.exists(ratio_path) and region_col is not None:
+            try:
+                df_ratio_loaded = pd.read_csv(ratio_path)
+                df_ratio_loaded = df_ratio_loaded[df_ratio_loaded['expression_ratio'] > 0]
+                df_ratio_loaded['log2_ratio'] = np.log2(df_ratio_loaded['expression_ratio'])
+
+                fig, ax = plt.subplots(figsize=(10, 6))
+                sns.boxplot(data=df_ratio_loaded, y='log2_ratio', ax=ax,
+                            boxprops=dict(alpha=0.3))
+                sns.stripplot(data=df_ratio_loaded, y='log2_ratio', ax=ax,
+                              size=2, alpha=0.4, jitter=0.3)
+                ax.axhline(y=0, color='red', linestyle='--', alpha=0.7)
+                ax.set_ylabel('log2(ST mean / scRNA median)')
+                ax.set_title('Expression Ratio Distribution (log2 scale)')
+                fig.tight_layout()
+                fig.savefig(os.path.join(output_dir, 'efficiency_ratio_boxplot_log2.png'), dpi=150)
+                plt.close(fig)
+                print("  > Region ratio boxplot (log2) saved.")
+            except Exception as e:
+                print(f"  > Region ratio boxplot failed: {e}")
+                plt.close('all')
     else:
         print("  > No region/spatial_annotation column found. Skipping region-based analysis.")
+
+    # C2-d: Reseg vs Original boxplot (genes/cell, counts/cell)
+    if adata_orig is not None:
+        try:
+            fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+            box_data = pd.concat([
+                pd.DataFrame({'value': adata_reseg.obs['total_counts'], 'Dataset': 'Resegmented'}),
+                pd.DataFrame({'value': adata_orig.obs['total_counts'], 'Dataset': 'Original'}),
+            ])
+            sns.boxplot(data=box_data, x='Dataset', y='value', ax=axes[0])
+            axes[0].set_ylabel('Counts per Cell')
+            axes[0].set_title('Total Counts per Cell')
+
+            box_data_g = pd.concat([
+                pd.DataFrame({'value': adata_reseg.obs['n_genes_by_counts'], 'Dataset': 'Resegmented'}),
+                pd.DataFrame({'value': adata_orig.obs['n_genes_by_counts'], 'Dataset': 'Original'}),
+            ])
+            sns.boxplot(data=box_data_g, x='Dataset', y='value', ax=axes[1])
+            axes[1].set_ylabel('Genes per Cell')
+            axes[1].set_title('Genes Detected per Cell')
+            fig.tight_layout()
+            fig.savefig(os.path.join(output_dir, 'efficiency_reseg_vs_original_boxplot.png'), dpi=150)
+            plt.close(fig)
+            print("  > Reseg vs Original boxplot saved.")
+        except Exception as e:
+            print(f"  > Reseg vs Original boxplot failed: {e}")
+            plt.close('all')
 
 
 def analyze_specificity(adata_reseg, config, output_dir, adata_orig=None):

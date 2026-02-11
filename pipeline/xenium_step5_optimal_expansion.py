@@ -85,12 +85,16 @@ def calculate_turnover(reads_assigned, reads_not_assigned, output_dir, sample_ta
 
     # Ensure overlaps_nucleus exists; use distance-based proxy if missing
     has_overlap_col = 'overlaps_nucleus' in reads_assigned.columns
+    used_proxy = False
+    proxy_threshold = None
     if not has_overlap_col:
         print("    [Turnover] 'overlaps_nucleus' column missing -- using distance-based proxy.")
         med_dist = reads_assigned['distance'].median()
         reads_assigned = reads_assigned.copy()
         reads_assigned['overlaps_nucleus'] = (reads_assigned['distance'] < med_dist).astype(int)
         print(f"    [Turnover] Proxy threshold (median distance): {med_dist:.2f}")
+        used_proxy = True
+        proxy_threshold = med_dist
 
     # Background expression from unassigned reads
     reads_not_assigned_clean = reads_not_assigned.dropna(subset=['domain', 'feature_name'])
@@ -356,6 +360,9 @@ def calculate_turnover(reads_assigned, reads_not_assigned, output_dir, sample_ta
         fh.write(f"optimal_expansion\t{optimal_expansion}\n")
         fh.write(f"mean_turnover\t{np.nanmean(meand_celltype)}\n")
         fh.write(f"mean_nuclei_size\t{np.nanmean(nuclimall)}\n")
+        fh.write(f"overlaps_nucleus_proxy\t{used_proxy}\n")
+        if used_proxy:
+            fh.write(f"proxy_threshold_median_distance\t{proxy_threshold}\n")
     print(f"    [Turnover] Saved optimal expansion value:  {txt_opt}")
 
     return turnover_summ, per_celltype, optimal_expansion

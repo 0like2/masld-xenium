@@ -109,11 +109,17 @@ def main():
             
     step0_adata_path = step0_output_file
     
-    # Search for transcripts.csv
+    # Search for transcripts.csv (or .parquet if configured)
     if os.path.exists(os.path.join(input_path, "transcripts.csv")):
         transcripts_csv_path = os.path.join(input_path, "transcripts.csv")
     elif os.path.exists(os.path.join(step0_dir, "transcripts.csv")):
         transcripts_csv_path = os.path.join(step0_dir, "transcripts.csv")
+
+    if not transcripts_csv_path and config.get('use_parquet', False):
+        parquet_path = os.path.join(input_path, "transcripts.parquet")
+        if os.path.exists(parquet_path):
+            transcripts_csv_path = parquet_path
+            print(f"  > Using parquet transcripts: {parquet_path}")
 
     # --- 3. Run Step 1: Dataset Exploration ---
     print("\n" + "-"*40)
@@ -206,14 +212,16 @@ def main():
             step3_config.setdefault('resegmentation', {}).setdefault('domain_assignment', {})['domain_map_path'] = potential_domain_map
 
         step3.run_step3(step3_config, dapi_path, curr_transcripts, step3_dir)
-        
-        with open(step3_marker, "w") as f:
-            f.write("done")
-            
-        step3_adata_path = step3_output_adata
-        step3_transcripts_path = step3_output_transcripts
-        if os.path.exists(step3_output_masks):
-            step3_mask_path = step3_output_masks
+
+        if os.path.exists(step3_output_adata):
+            with open(step3_marker, "w") as f:
+                f.write("done")
+            step3_adata_path = step3_output_adata
+            step3_transcripts_path = step3_output_transcripts
+            if os.path.exists(step3_output_masks):
+                step3_mask_path = step3_output_masks
+        else:
+            print("  > Step 3 did not produce output (disabled or failed).")
 
     # --- 6. Run Step 4: Comparison & Validation (Metrics) ---
     # Formerly Step 3
@@ -267,9 +275,13 @@ def main():
     else:
         try:
             step5.run_step5(step5_config)
-            with open(step5_marker, "w") as f:
-                f.write("done")
-            print("Step 5 (Optimal Expansion) completed successfully.")
+            step5_csv = os.path.join(step5_dir, f"{sample_tag}_step5_expanded_transcripts.csv")
+            if os.path.exists(step5_csv):
+                with open(step5_marker, "w") as f:
+                    f.write("done")
+                print("Step 5 (Optimal Expansion) completed successfully.")
+            else:
+                print("  > Step 5 did not produce output (disabled or failed).")
         except Exception as e:
             logger.error(f"Step 5 failed: {e}")
 
