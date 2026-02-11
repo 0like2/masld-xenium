@@ -61,7 +61,7 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools
 
 # Install Baysor pre-built binary
-RUN wget -qO /usr/local/bin/baysor \
+RUN wget --retry-connrefused --waitretry=5 --tries=3 -O /usr/local/bin/baysor \
     https://github.com/kharchenkolab/Baysor/releases/download/v0.7.2/baysor-v0.7.2-x86_64-linux-gnu \
     && chmod +x /usr/local/bin/baysor
 
