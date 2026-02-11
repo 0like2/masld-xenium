@@ -1,0 +1,195 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "masld-xenium"
+version = "1.2.0"
+description = "Xenium spatial transcriptomics analysis pipeline and benchmarking toolkit"
+authors = [{name = "Sergio Marco Salas", email = "sergiomarco.salas@scilifelab.se"}]
+readme = "README.md"
+requires-python = ">=3.11"
+keywords = ["spatial-transcriptomics", "xenium", "bioinformatics", "segmentation"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+
+dependencies = [
+    "affine==2.4.0",
+    "aiobotocore==2.26.0",
+    "aiohappyeyeballs==2.6.1",
+    "aiohttp==3.13.3",
+    "aioitertools==0.13.0",
+    "aiosignal==1.4.0",
+    "alphashape==1.3.1",
+    "anndata==0.12.7",
+    "array-api-compat==1.13.0",
+    "attrs==25.4.0",
+    "botocore==1.41.5",
+    "cellpose==4.0.8",
+    "certifi==2026.1.4",
+    "charset-normalizer==3.4.4",
+    "click==8.3.1",
+    "click-log==0.4.0",
+    "click-plugins==1.1.1.2",
+    "cligj==0.7.2",
+    "cloudpickle==3.1.2",
+    "colorcet==3.1.0",
+    "contourpy==1.3.3",
+    "cycler==0.12.1",
+    "dask==2024.11.2",
+    "dask-expr==1.1.19",
+    "dask-image==2025.11.0",
+    "datashader==0.18.2",
+    "docrep==0.3.2",
+    "donfig==0.8.1.post1",
+    "fastremap==1.17.7",
+    "filelock==3.20.2",
+    "fill_voids==2.1.1",
+    "fonttools==4.61.1",
+    "frozenlist==1.8.0",
+    "fsspec==2025.12.0",
+    "geopandas==1.1.2",
+    "google-crc32c==1.8.0",
+    "h5py==3.15.1",
+    "idna==3.11",
+    "igraph==1.0.0",
+    "imagecodecs==2025.11.11",
+    "ImageIO==2.37.2",
+    "inflect==7.5.0",
+    "Jinja2==3.1.6",
+    "jmespath==1.0.1",
+    "joblib==1.5.3",
+    "kiwisolver==1.4.9",
+    "lazy_loader==0.4",
+    "legacy-api-wrap==1.5",
+    "leidenalg==0.11.0",
+    "llvmlite==0.46.0",
+    "locket==1.0.0",
+    "markdown-it-py==4.0.0",
+    "MarkupSafe==3.0.3",
+    "matplotlib==3.10.8",
+    "matplotlib-scalebar==0.9.0",
+    "mdurl==0.1.2",
+    "more-itertools==10.8.0",
+    "mpmath==1.3.0",
+    "multidict==6.7.0",
+    "multipledispatch==1.0.0",
+    "multiscale_spatial_image==2.0.3",
+    "natsort==8.4.0",
+    "networkx==3.6.1",
+    "numba==0.63.1",
+    "numcodecs==0.16.5",
+    "numpy==2.2.6",
+    "ome-zarr==0.12.2",
+    "omnipath==1.0.12",
+    "opencv-python-headless==4.12.0.88",
+    "ovrlpy==1.0.1",
+    "packaging==25.0",
+    "pandas==2.3.3",
+    "param==2.3.1",
+    "partd==1.4.2",
+    "pathlib_abc==0.5.2",
+    "patsy==1.0.2",
+    "pillow==12.1.0",
+    "PIMS==0.7",
+    "platformdirs==4.5.1",
+    "polars==1.36.1",
+    "polars-runtime-32==1.36.1",
+    "points2regions==0.0.6",
+    "pooch==1.8.2",
+    "propcache==0.4.1",
+    "pyarrow==22.0.0",
+    "pyct==0.6.0",
+    "Pygments==2.19.2",
+    "pynndescent==0.5.13",
+    "pyogrio==0.12.1",
+    "pyparsing==3.3.1",
+    "pyproj==3.7.2",
+    "python-dateutil==2.9.0.post0",
+    "pytz==2025.2",
+    "PyYAML==6.0.3",
+    "rasterio==1.4.4",
+    "requests==2.32.5",
+    "rich==14.2.0",
+    "roifile==2025.12.12",
+    "rtree==1.4.1",
+    "s3fs==2025.12.0",
+    "scanpy==1.11.5",
+    "scikit-image==0.26.0",
+    "scikit-learn==1.8.0",
+    "scipy==1.16.3",
+    "seaborn==0.13.2",
+    "segment-anything==1.0",
+    "session-info2==0.3",
+    "setuptools==80.9.0",
+    "shapely==2.1.2",
+    "six==1.17.0",
+    "slicerator==1.1.0",
+    "spatial_image==1.2.3",
+    "spatialdata==0.6.1",
+    "spatialdata-plot==0.2.13",
+    "squidpy==1.7.0",
+    "statsmodels==0.14.6",
+    "sympy==1.14.0",
+    "texttable==1.7.0",
+    "threadpoolctl==3.6.0",
+    "tifffile==2025.12.20",
+    "toolz==1.1.0",
+    "torch==2.9.1",
+    "torchvision==0.24.1",
+    "tqdm==4.67.1",
+    "trimesh==4.10.1",
+    "typeguard==4.4.4",
+    "typing_extensions==4.15.0",
+    "tzdata==2025.3",
+    "umap-learn==0.5.9.post2",
+    "universal_pathlib==0.3.7",
+    "urllib3==2.6.2",
+    "validators==0.35.0",
+    "wrapt==1.17.3",
+    "xarray==2025.12.0",
+    "xarray-dataclass==3.0.0",
+    "xarray-schema==0.0.3",
+    "xarray-spatial==0.5.2",
+    "yarl==1.22.0",
+    "zarr==3.1.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "black>=23.0",
+    "ruff>=0.1",
+    "mypy>=1.0",
+]
+
+[project.scripts]
+xenium-pipeline = "pipeline.pipeline_main:main"
+
+[project.urls]
+Documentation = "https://xenium-benchmarking-test.readthedocs.io/"
+Repository = "https://github.com/Moldia/Xenium_benchmarking"
+Homepage = "https://github.com/Moldia/Xenium_benchmarking"
+
+[tool.setuptools.packages.find]
+include = ["xb*", "pipeline*"]
+exclude = ["notebooks*", "data*", "docker*", "tests*"]
+
+[tool.black]
+line-length = 100
+target-version = ['py311']
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = ["E", "F", "W"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true

@@ -1,13 +1,5 @@
-from xb.plotting import .
-from xb.formatting import .
-from xb._combined import .
-from xb._quality_metrics import .
-from xb.calculating import .
-from xb.comparing import .
-from xb.preprocessing import .
-from xb.simulating import .
-from xb.neighborhood import .
-from xb.domain_identificaion import .
-from xb.Spage_main import .
-from xb.util import .
+"""MASLD Xenium: Spatial transcriptomics analysis pipeline and benchmarking toolkit."""
 
+__version__ = "1.2.0"
+__author__ = "Sergio Marco Salas"
+__email__ = "sergiomarco.salas@scilifelab.se"
