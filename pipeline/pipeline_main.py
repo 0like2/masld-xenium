@@ -168,6 +168,21 @@ def main():
             return
 
 
+    # --- 4.5 Auto-download scRNA-seq reference (needed by Steps 4 & 6) ---
+    from utils.reference_downloader import ensure_reference
+
+    # Only attempt download if no manual path is already configured and valid
+    existing_ref = config.get("comparison", {}).get("sc_reference_path")
+    if not existing_ref or not os.path.isfile(existing_ref):
+        ref_path = ensure_reference(config, base_output_root)
+        if ref_path:
+            print(f"  > scRNA-seq reference available: {ref_path}")
+            config.setdefault("comparison", {})["sc_reference_path"] = ref_path
+            config.setdefault("benchmark", {})["reference_adata"] = ref_path
+            config.setdefault("benchmark", {})["sc_reference_path"] = ref_path
+    else:
+        print(f"  > Using manually configured sc_reference_path: {existing_ref}")
+
     # --- 5. Run Step 3: Resegmentation (Cellpose) ---
     # Formerly Step 4
     print("\n" + "-"*40)

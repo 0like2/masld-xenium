@@ -406,11 +406,40 @@ def run_step5(config):
 
     print(f"    - Loading Step 0 Data from: {step0_file}")
     adata_step0 = sc.read_h5ad(step0_file)
-    if 'spots' not in adata_step0.uns:
-        logging.error("    - 'spots' dataframe missing in Step 0 adata.uns.")
+
+    reads_original = None
+    # 1) Legacy: uns['spots'] DataFrame (older Step 0 outputs)
+    if 'spots' in adata_step0.uns:
+        reads_original = adata_step0.uns['spots'].copy()
+    else:
+        # 2) uns['spots_path'] — Step 0 stores parquet path here after del uns['spots']
+        spots_path = adata_step0.uns.get('spots_path')
+        if spots_path and os.path.exists(str(spots_path)):
+            print(f"    - Loading transcripts from sidecar: {spots_path}")
+            reads_original = pd.read_parquet(str(spots_path))
+        else:
+            # 3) Convention-based sidecar search
+            step0_dir = os.path.dirname(step0_file)
+            for candidate in [
+                os.path.join(step0_dir, f"{sample_tag}_transcripts.parquet"),
+                os.path.join(step0_dir, "transcripts.parquet"),
+                os.path.join(step0_dir, "transcripts.csv"),
+            ]:
+                if os.path.exists(candidate):
+                    print(f"    - Loading transcripts from sidecar: {candidate}")
+                    if candidate.endswith('.parquet'):
+                        reads_original = pd.read_parquet(candidate)
+                    else:
+                        reads_original = pd.read_csv(candidate, low_memory=False)
+                    break
+
+    if reads_original is None:
+        logging.error(
+            "    - Transcripts not found: uns['spots'], uns['spots_path'], "
+            "or sidecar files all missing."
+        )
         return
 
-    reads_original = adata_step0.uns['spots'].copy()
     print(f"    - Loaded {len(reads_original)} original reads.")
 
     # --- 5-2. Load annotated cells (Step 1/2/4) ---

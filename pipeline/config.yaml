@@ -60,6 +60,13 @@ segmentation_free:
     radius: 50.0
     bw: 1
 
+# scRNA-seq Reference (auto-downloaded if not provided)
+sc_reference:
+  auto_download: true
+  url: "https://sea-ad-single-cell-profiling.s3.us-west-2.amazonaws.com/MTG/RNAseq/Reference_MTG_RNAseq_all-nuclei.2022-06-07.h5ad"
+  dest_dir: "data/scRNAseq"
+  celltype_key: "subclass_label"
+
 # Step 3: Comparison (Metrics) - Now Executed as Step 4
 comparison:
   run_efficiency: true

@@ -59,6 +59,15 @@ def _negative_marker_purity_coexpression(adata_sp, adata_sc, key='celltype', pip
     """
     minimum_exp = 0.05
 
+    # Normalize gene names to lowercase (notebook 3_4, cell-20 pattern)
+    adata_sp = adata_sp.copy()
+    adata_sc = adata_sc.copy()
+    adata_sp.var_names = [g.lower() for g in adata_sp.var_names]
+    adata_sc.var_names = [g.lower() for g in adata_sc.var_names]
+    # Remove duplicates after lowering
+    adata_sp = adata_sp[:, ~adata_sp.var_names.duplicated()]
+    adata_sc = adata_sc[:, ~adata_sc.var_names.duplicated()]
+
     adata_sp = adata_sp[:, adata_sp.var_names.isin(adata_sc.var_names)]
     adata_sc = adata_sc[:, adata_sp.var_names]
 
