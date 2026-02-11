@@ -27,7 +27,6 @@ import matplotlib
 import matplotlib.pyplot as plt
 from scipy.spatial import cKDTree, ConvexHull
 import random as rd
-import math
 
 matplotlib.rcParams['pdf.fonttype'] = 42
 matplotlib.rcParams['ps.fonttype'] = 42
@@ -41,8 +40,10 @@ def dist_nuc(reads_ctdsub):
             if len(n) < 3:
                 continue
             hull = ConvexHull(np.array(n.loc[:, ['x_location', 'y_location']]))
-            if 'distance' in n.columns:
-                allds.append(np.mean(n.iloc[hull.vertices]['distance']))
+            if 'distance' not in n.columns:
+                logger.warning("dist_nuc(): 'distance' column missing for cell_id=%s", g)
+                continue
+            allds.append(np.mean(n.iloc[hull.vertices]['distance']))
         except Exception:
             pass
     if len(allds) > 0:
@@ -52,18 +53,6 @@ def dist_nuc(reads_ctdsub):
     return median_dist
 
 
-def distance_calc(x1, y1, x2, y2):
-    """Euclidean distance between two points."""
-    return math.sqrt(((x1 - x2) ** 2) + ((y1 - y2) ** 2))
-
-
-def hex_to_rgb(value):
-    """Hex color string to RGB tuple."""
-    value = value.lstrip('#')
-    lv = len(value)
-    return tuple(int(value[i:i + lv // 3], 16) for i in range(0, lv, lv // 3))
-
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -71,7 +60,8 @@ logger = logging.getLogger(__name__)
 # --- Correlation-based Turnover / Crossover Analysis ---
 
 def calculate_turnover(reads_assigned, reads_not_assigned, output_dir, sample_tag,
-                       min_reads_per_domain=5000, diff_threshold=0.1):
+                       min_reads_per_domain=5000, diff_threshold=0.1,
+                       celltype_colors=None):
     """
     Correlation-based turnover/crossover for each cell-type x domain.
 
@@ -82,6 +72,12 @@ def calculate_turnover(reads_assigned, reads_not_assigned, output_dir, sample_ta
       4. Correlate expression at each distance bin with nuclear and background.
       5. Turnover distance = first bin where (corr_nuc - corr_back) < diff_threshold.
       6. Compute nuclei_size and cell_size via dist_nuc.
+
+    Parameters
+    ----------
+    celltype_colors : dict or None
+        Mapping from cell type name to color (hex). If available from
+        adata.uns['{celltype_key}_colors'], passed here for consistent plots.
 
     Returns (turnover_summary, per_celltype_df, optimal_expansion_value).
     """
@@ -259,30 +255,89 @@ def calculate_turnover(reads_assigned, reads_not_assigned, output_dir, sample_ta
     print(f"    [Turnover] Mean nuclei size       : {np.nanmean(nuclimall):.3f}")
     print(f"    [Turnover] >>> Optimal expansion   : {optimal_expansion:.3f}")
 
-    # --- 5-8e. Summary barplot + CSVs ---
+    # --- 5-8e. Summary barplot + CSVs (matching notebook cells 33-39) ---
     try:
         per_ct_sorted = per_celltype.dropna(subset=['turnover']).sort_values('turnover')
         if len(per_ct_sorted) > 0:
+            # Build per-domain score table for error-bar barplot (notebook tfmerge style)
+            tball_frames = []
+            for ct in turnover_summ.columns:
+                tb = pd.DataFrame(turnover_summ[ct]).copy()
+                tb.columns = ['score']
+                tb['cluster'] = ct
+                tb = tb.reset_index(drop=True)
+                tball_frames.append(tb)
+            if tball_frames:
+                tball = pd.concat(tball_frames, axis=0, ignore_index=True)
+            else:
+                tball = pd.DataFrame(columns=['score', 'cluster'])
+
+            # Merge per-domain scores with per-celltype summary
+            tf = per_ct_sorted.copy()
+            tf['cluster'] = tf['celltype']
+            tfmerge = tball.merge(tf, on='cluster', how='inner')
+            tfmerge = tfmerge.sort_values(by='turnover')
+
+            # Determine palette: use custom colors if available, else tab20
+            if celltype_colors and len(celltype_colors) > 0:
+                palette = [celltype_colors.get(ct, '#999999') for ct in tf.sort_values('turnover')['celltype']]
+            else:
+                palette = 'tab20'
+
+            # --- Main barplot (all cell types) ---
             fig, ax = plt.subplots(figsize=(10, max(4, len(per_ct_sorted) * 0.5)))
+            sns.scatterplot(
+                data=tfmerge, y='cluster', x='cell_size',
+                edgecolor='gray', color='black', s=80, label='cell_size', ax=ax, zorder=3
+            )
             sns.barplot(
-                data=per_ct_sorted, y='celltype', x='turnover',
-                palette='tab20', alpha=0.85, ax=ax
+                data=tfmerge, y='cluster', x='score',
+                palette=palette, alpha=0.9, errorbar='sd', ax=ax
             )
             sns.scatterplot(
-                data=per_ct_sorted, y='celltype', x='nuclei_size',
-                color='#D83066', edgecolor=None, alpha=0.7, s=80, label='nuclei_size', ax=ax
-            )
-            sns.scatterplot(
-                data=per_ct_sorted, y='celltype', x='cell_size',
-                color='black', edgecolor='gray', s=80, label='cell_size', ax=ax
+                data=tfmerge, y='cluster', x='nuclei_size',
+                color='#D83066', edgecolor=None, alpha=0.7, s=80, label='nuclei_size', ax=ax, zorder=3
             )
             ax.set_xlabel("Distance")
-            ax.set_title("Turnover per cell type")
+            ax.set_title("Turnover per cell type (per-domain scores)")
             ax.legend(loc='lower right')
             summary_plot_path = os.path.join(output_dir, f"{sample_tag}_step5_turnover_barplot.png")
             fig.savefig(summary_plot_path, dpi=300, bbox_inches='tight')
             plt.close(fig)
             print(f"    [Turnover] Saved barplot: {summary_plot_path}")
+
+            # --- Filtered barplot: cell types with >5 domains (notebook cells 38-39) ---
+            domain_counts_per_ct = tball.dropna(subset=['score']).groupby('cluster').size()
+            ct_with_many_domains = domain_counts_per_ct[domain_counts_per_ct > 5].index
+            if len(ct_with_many_domains) > 1:
+                tfmerge_sub = tfmerge[tfmerge['cluster'].isin(ct_with_many_domains)]
+                tf_sub = tf[tf['celltype'].isin(ct_with_many_domains)]
+                if celltype_colors and len(celltype_colors) > 0:
+                    palette_sub = [celltype_colors.get(ct, '#999999')
+                                   for ct in tf_sub.sort_values('turnover')['celltype']]
+                else:
+                    palette_sub = 'tab20'
+
+                fig2, ax2 = plt.subplots(figsize=(10, max(4, len(tf_sub) * 0.5)))
+                sns.scatterplot(
+                    data=tfmerge_sub, y='cluster', x='cell_size',
+                    edgecolor='gray', color='black', s=80, label='cell_size', ax=ax2, zorder=3
+                )
+                sns.barplot(
+                    data=tfmerge_sub, y='cluster', x='score',
+                    palette=palette_sub, alpha=0.9, errorbar='sd', ax=ax2
+                )
+                sns.scatterplot(
+                    data=tfmerge_sub, y='cluster', x='nuclei_size',
+                    color='#D83066', edgecolor=None, alpha=0.7, s=80, label='nuclei_size', ax=ax2, zorder=3
+                )
+                ax2.set_xlabel("Distance")
+                ax2.set_title("Turnover (cell types with >5 domains)")
+                ax2.legend(loc='lower right')
+                filt_plot_path = os.path.join(output_dir, f"{sample_tag}_step5_turnover_barplot_filtered.png")
+                fig2.savefig(filt_plot_path, dpi=300, bbox_inches='tight')
+                plt.close(fig2)
+                print(f"    [Turnover] Saved filtered barplot: {filt_plot_path}")
     except Exception as e:
         logger.warning(f"    [Turnover] Summary barplot failed: {e}")
         plt.close('all')
@@ -361,7 +416,7 @@ def run_step5(config):
         print("    - [Info] 'previous_step_adata_path' missing or invalid. Searching...")
         parent_dir = os.path.dirname(output_dir)
         possible_paths = [
-            os.path.join(parent_dir, "step4_resegmentation", f"{sample_tag}_resegmented.h5ad"),
+            os.path.join(parent_dir, "step3_resegmentation", f"{sample_tag}_step3_resegmented.h5ad"),
             os.path.join(parent_dir, "step1_exploration", f"{sample_tag}_step1_exploration.h5ad"),
             os.path.join(parent_dir, "step2_segmentation_free", f"{sample_tag}_step2_points2regions.h5ad")
         ]
@@ -381,9 +436,10 @@ def run_step5(config):
     # --- 5-3. Map domain assignments to reads ---
     print("\n[Step 5-2] Identifying Domains & Unassigned Reads...")
 
+    # Domain key (spatial regions)
     domain_key = None
-    priority_keys = ['spatial_annotation', 'Class', 'leiden', 'cluster', 'graph_clusters']
-    for key in priority_keys:
+    domain_priority = ['spatial_annotation', 'region_annotation', 'leiden', 'cluster', 'graph_clusters']
+    for key in domain_priority:
         if key in adata_annotated.obs.columns:
             domain_key = key
             break
@@ -392,6 +448,18 @@ def run_step5(config):
         logging.error("    - No suitable domain/cluster key found in annotated adata. Cannot assign domains.")
         return
     print(f"    - Using '{domain_key}' as domain source.")
+
+    # Cell-type key (distinct from domain — used for per-celltype turnover)
+    celltype_key = None
+    celltype_priority = ['Class', 'celltype', 'cell_type', 'initial_annotation', 'ct_majority']
+    for key in celltype_priority:
+        if key in adata_annotated.obs.columns:
+            celltype_key = key
+            break
+    if celltype_key is None:
+        celltype_key = domain_key  # fallback: use domain as cell-type proxy
+        logger.warning("    - No cell-type column found; using domain key '%s' as cell-type proxy.", domain_key)
+    print(f"    - Using '{celltype_key}' as cell-type annotation source.")
 
     if 'cell_id' in adata_annotated.obs.columns:
         annotated_ids = adata_annotated.obs['cell_id']
@@ -410,7 +478,7 @@ def run_step5(config):
 
     reads_original['domain'] = reads_original['cell_id'].map(domain_map)
 
-    ct_map = dict(zip(annotated_ids, adata_annotated.obs[domain_key]))
+    ct_map = dict(zip(annotated_ids, adata_annotated.obs[celltype_key]))
     reads_original['initial_annotation'] = reads_original['cell_id'].map(ct_map)
 
     nancells = reads_original[reads_original['domain'].isna()]
@@ -581,6 +649,24 @@ def run_step5(config):
     )
     reads_assigned_val['distance'] = reads_assigned_val['distance'].round(0)
 
+    # --- QC scatter: reads + centroids overlay (notebook cell 22) ---
+    try:
+        fig_qc, ax_qc = plt.subplots(figsize=(10, 10))
+        sub_reads = reads_assigned_val.sample(n=min(len(reads_assigned_val), 100000), random_state=42)
+        ax_qc.scatter(sub_reads['x_location'], sub_reads['y_location'], s=1, alpha=0.3, label='reads')
+        ax_qc.scatter(sub_reads['x_cell'].drop_duplicates(), sub_reads['y_cell'].drop_duplicates(),
+                       s=0.5, color='red', alpha=0.5, label='centroids')
+        ax_qc.set_title("Reads vs Cell Centroids")
+        ax_qc.legend(markerscale=5)
+        ax_qc.axis('equal')
+        qc_path = os.path.join(output_dir, f"{sample_tag}_step5_reads_vs_centroids.png")
+        fig_qc.savefig(qc_path, dpi=150, bbox_inches='tight')
+        plt.close(fig_qc)
+        print(f"    - Saved reads vs centroids QC plot: {qc_path}")
+    except Exception as e:
+        logger.warning(f"    - Reads vs centroids QC plot failed: {e}")
+        plt.close('all')
+
     if 'initial_annotation' not in reads_assigned_val.columns or reads_assigned_val['initial_annotation'].isna().all():
         reads_assigned_val['initial_annotation'] = reads_assigned_val['cell_id'].map(
             dict(zip(annotated_ids, adata_annotated.obs[domain_key]))
@@ -591,13 +677,26 @@ def run_step5(config):
         print("\n=== Step 5 Optimal Expansion Complete ===")
         return
 
+    # Extract custom colors from adata if available (notebook uses Class_colors)
+    celltype_colors = None
+    if celltype_key:
+        color_key = f'{celltype_key}_colors'
+        if color_key in adata_annotated.uns:
+            cats = adata_annotated.obs[celltype_key].cat.categories if hasattr(
+                adata_annotated.obs[celltype_key], 'cat') else adata_annotated.obs[celltype_key].unique()
+            colors = adata_annotated.uns[color_key]
+            if len(colors) >= len(cats):
+                celltype_colors = dict(zip(cats, colors[:len(cats)]))
+                print(f"    - Using custom '{color_key}' palette ({len(celltype_colors)} colors)")
+
     turnover_summ, per_celltype, optimal_expansion = calculate_turnover(
         reads_assigned=reads_assigned_val,
         reads_not_assigned=reads_not_assigned,
         output_dir=output_dir,
         sample_tag=sample_tag,
         min_reads_per_domain=min_reads_per_domain,
-        diff_threshold=diff_threshold
+        diff_threshold=diff_threshold,
+        celltype_colors=celltype_colors
     )
 
     if per_celltype is not None:

@@ -66,6 +66,15 @@ comparison:
   run_diffusion: true   # New: Moved from Resegmentation
   technology: "xenium"  # For pixel-to-um conversion: xenium|cosmx|vizgen|merfish|hybriss|resolvedbio
 
+  # Positivity analysis preprocessing (matching notebook 3_5 defaults)
+  positivity:
+    n_neighbors: 8        # Notebook default: 8
+    n_pcs: 0              # Notebook default: 0 (no PCA, use expression directly)
+    leiden_resolution: 2.2 # Notebook default: 2.2
+    umap_min_dist: 0.1    # Notebook default: 0.1
+    min_counts: 10        # Cell filtering: min transcripts per cell
+    min_genes: 3          # Cell filtering: min genes per cell
+
   # Optional: Comparison with other datasets
   visium_path: null
   sc_reference_path: null # Path to scRNAseq reference .h5ad for Specificity (NMP) analysis
@@ -73,13 +82,15 @@ comparison:
 # Step 4: Resegmentation (Cellpose)
 resegmentation:
   run_resegmentation: false
-  
+  expansion_distance: 400  # Pixels to expand nuclei masks (notebook default: 400). Set 0 to disable.
+  um_per_pixel_inv: 4.70588  # Pixel-to-µm factor for cell area conversion (Xenium default)
+
   cellpose:
     # use_gpu: auto-detected (CUDA > MPS > CPU)
     model_type: 'nuclei'
     diameter: null # Auto-detect if null
     channels: [0, 0] # Grayscale
-    
+
   # Domain Assignment Params (from Notebook 3.2 logic if implemented)
   domain_assignment:
     n_domains: 5
@@ -104,8 +115,10 @@ benchmark:
     umap_min_dist: 0.1
     resolution: 1.0
     scale: false
+    hvg: true  # HVG selection before PCA (notebook default: true, params: min_mean=0.3, max_mean=7, min_disp=-0.5)
   reference_adata: null  # Path to reference .h5ad for annotation transfer
   ref_celltype_key: "celltype"  # Column in reference adata for cell type labels
+  sc_reference_path: null  # Path to scRNAseq reference .h5ad for NMP metrics (needs layers['raw'] + obs['celltype'])
 
 # Step 7: Simulation & Preprocessing
 simulation:

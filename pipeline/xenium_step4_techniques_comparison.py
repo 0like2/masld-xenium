@@ -31,7 +31,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 
-# --- Inlined from xb/calculating.py (pipeline self-contained) ---
+# --- Self-contained NMP/co-expression functions (originally from xb/calculating.py) ---
 
 def _coexpression_calculation(exp, min_exp=0):
     """Gene-gene co-expression matrix: fraction of positive cells per gene pair."""
@@ -45,8 +45,14 @@ def _coexpression_calculation(exp, min_exp=0):
 
 
 def _negative_marker_purity_coexpression(adata_sp, adata_sc, key='celltype', pipeline_output=True, minexp=0.0):
-    """Negative marker purity via co-expression (from xb.calculating)."""
-    min_number_cells = 10
+    """Negative marker purity via co-expression.
+
+    Returns
+    -------
+    If pipeline_output=True: scalar NMP score
+    If pipeline_output=False: (nmp, purity_per_gene, purity_per_celltype,
+                                lowvals_sc, lowvals_sp, commongenes)
+    """
     minimum_exp = 0.05
 
     adata_sp = adata_sp[:, adata_sp.var_names.isin(adata_sc.var_names)]
@@ -69,6 +75,7 @@ def _negative_marker_purity_coexpression(adata_sp, adata_sc, key='celltype', pip
     mean_ct_sc_norm = mean_celltype_sc
     mean_ct_sp_norm = mean_celltype_sp
 
+    commongenes = mean_ct_sc_rel.index
     neg_marker_mask = np.array(mean_ct_sc_rel < minimum_exp)
 
     if np.sum(neg_marker_mask) < 1:
@@ -77,7 +84,7 @@ def _negative_marker_purity_coexpression(adata_sp, adata_sc, key='celltype', pip
         if pipeline_output:
             return negative_marker_purity
         else:
-            return negative_marker_purity, None, None
+            return negative_marker_purity, None, None, None, None, commongenes
 
     lowvals_sc = mean_ct_sc_norm.values[neg_marker_mask]
     lowvals_sp = mean_ct_sp_norm.values[neg_marker_mask]
@@ -94,17 +101,9 @@ def _negative_marker_purity_coexpression(adata_sp, adata_sc, key='celltype', pip
         purities = purities.loc[~(purities.isnull().all(axis=1)), ~(purities.isnull().all(axis=0))]
         purity_per_gene = purities.mean(axis=0, skipna=True)
         purity_per_celltype = purities.mean(axis=1, skipna=True)
-        return negative_marker_purity, purity_per_gene, purity_per_celltype
+        return negative_marker_purity, purity_per_gene, purity_per_celltype, lowvals_sc, lowvals_sp, commongenes
 
-# Pixel-to-um conversion factors by technology
-PIXEL_TO_UM = {
-    'xenium': 4.70588,
-    'cosmx': 8.3333,
-    'vizgen': 9.20586,
-    'merfish': 9.28,
-    'hybriss': 3.11,
-    'resolvedbio': 7.24,
-}
+from pipeline.utils.spatial_utils import PIXEL_TO_UM_FACTORS as PIXEL_TO_UM
 
 
 def run_step4(config, adata_path, transcripts_path, output_dir, original_adata_path=None, original_transcripts_path=None):
@@ -177,7 +176,7 @@ def run_step4(config, adata_path, transcripts_path, output_dir, original_adata_p
     if run_positivity:
         print("Running Positivity Analysis (Validation)...")
         try:
-            analyze_positivity(adata_reseg, figs_dir, sample_tag, adata_orig)
+            analyze_positivity(adata_reseg, figs_dir, sample_tag, adata_orig, comp_config)
         except Exception as e:
             print(f"Error in Positivity Analysis: {e}")
 
@@ -302,7 +301,7 @@ def analyze_efficiency(adata_reseg, output_dir, adata_orig=None, comp_config=Non
 
     # --- 4-2c. Region-based efficiency breakdown ---
     region_col = None
-    for candidate in ['spatial_annotation', 'region', 'tissue_region', 'domain']:
+    for candidate in ['region_annotation', 'spatial_annotation', 'region', 'tissue_region', 'domain']:
         if candidate in adata_reseg.obs.columns:
             region_col = candidate
             break
@@ -348,18 +347,97 @@ def analyze_specificity(adata_reseg, config, output_dir, adata_orig=None):
 
     # --- 4-3a. Negative marker purity (coexpression) ---
     sc_ref_path = config.get('sc_reference_path')
+    purity_dfs = []  # Collect per-gene purity for Eff vs Spec scatter
     if sc_ref_path and os.path.exists(sc_ref_path):
         print(f"  > Reference scRNAseq found at {sc_ref_path}. Calculating Negative Marker Purity (NMP)...")
         try:
             adata_sc = sc.read_h5ad(sc_ref_path)
 
+            # Load efficiency ratio CSV for gene filtering (ratio < 10) per notebook
+            ratio_path = os.path.join(output_dir, 'efficiency_expression_ratio.csv')
+            ratio_filter_genes = None
+            if os.path.exists(ratio_path):
+                df_ratio = pd.read_csv(ratio_path)
+                ratio_filter_genes = set(df_ratio[df_ratio['expression_ratio'] < 10]['gene'].values)
+                print(f"  > Filtering to {len(ratio_filter_genes)} genes with efficiency ratio < 10")
+
             with open(os.path.join(output_dir, 'specificity_nmp_score.txt'), 'w') as f:
                 f.write(f"Reference: {sc_ref_path}\n")
 
                 for label, ad in datasets:
-                    nmp_score = _negative_marker_purity_coexpression(ad, adata_sc, pipeline_output=True)
+                    # Apply gene filtering if available
+                    ad_filtered = ad
+                    if ratio_filter_genes is not None:
+                        common = [g for g in ad.var_names if g in ratio_filter_genes]
+                        if len(common) > 10:
+                            ad_filtered = ad[:, common]
+                            print(f"  > [{label}] Using {len(common)} filtered genes for NMP")
+
+                    # Full return: nmp, purity_per_gene, purity_per_celltype, lowvals_sc, lowvals_sp, commongenes
+                    result = _negative_marker_purity_coexpression(
+                        ad_filtered, adata_sc, pipeline_output=False)
+                    nmp_score = result[0]
+                    purity_per_gene = result[1]
+                    purity_per_celltype = result[2]
+
                     print(f"  > [{label}] NMP Score: {nmp_score}")
                     f.write(f"[{label}] Negative Marker Purity (NMP) Score: {nmp_score}\n")
+
+                    # Save per-gene purity CSV
+                    if purity_per_celltype is not None:
+                        safe_label = label.lower().replace(' ', '_')
+                        df_purity = pd.DataFrame({
+                            'gene': purity_per_celltype.index,
+                            'purity': 1 - purity_per_celltype.values,
+                            'method': label,
+                        })
+                        purity_csv = os.path.join(output_dir, f'specificity_nmp_per_gene_{safe_label}.csv')
+                        df_purity.to_csv(purity_csv, index=False)
+                        print(f"  > [{label}] Per-gene purity saved to {purity_csv}")
+                        purity_dfs.append(df_purity)
+
+            # --- 4-3a-2. Per-gene NMP boxplot (Reseg vs Original) ---
+            if purity_dfs:
+                df_purity_all = pd.concat(purity_dfs, ignore_index=True)
+                df_purity_all.to_csv(os.path.join(output_dir, 'specificity_nmp_per_gene_all.csv'), index=False)
+
+                plt.figure(figsize=(10, 5))
+                sns.boxplot(data=df_purity_all, x='method', y='purity', boxprops=dict(alpha=0.3))
+                sns.stripplot(data=df_purity_all, x='method', y='purity',
+                              edgecolor='black', linewidth=0.1, s=3, jitter=0.2)
+                plt.ylim([max(0, df_purity_all['purity'].min() - 0.05), 1.05])
+                plt.title('Negative Marker Purity (NMP) per Gene')
+                plt.ylabel('Purity Score')
+                plt.xlabel('Dataset')
+                plt.tight_layout()
+                plt.savefig(os.path.join(output_dir, 'specificity_nmp_per_gene_boxplot.png'), dpi=150)
+                plt.close()
+                print("  > NMP per-gene boxplot saved.")
+
+            # --- 4-3a-3. Efficiency vs Specificity scatter ---
+            if purity_dfs and os.path.exists(ratio_path):
+                try:
+                    df_ratio = pd.read_csv(ratio_path)
+                    for df_pur in purity_dfs:
+                        label = df_pur['method'].iloc[0]
+                        merged = df_ratio.merge(df_pur, left_on='gene', right_on='gene', how='inner')
+                        if len(merged) > 0:
+                            plt.figure(figsize=(8, 8))
+                            plt.scatter(merged['expression_ratio'], merged['purity'],
+                                        s=15, alpha=0.7, edgecolors='black', linewidth=0.3)
+                            plt.xlabel('Efficiency Ratio (ST / scRNAseq)')
+                            plt.ylabel('Specificity (Purity)')
+                            plt.title(f'Efficiency vs Specificity [{label}]')
+                            plt.axhline(y=1.0, color='grey', linestyle='--', alpha=0.5)
+                            plt.axvline(x=1.0, color='red', linestyle='--', alpha=0.5)
+                            safe_label = label.lower().replace(' ', '_')
+                            plt.tight_layout()
+                            plt.savefig(os.path.join(output_dir,
+                                        f'specificity_vs_efficiency_scatter_{safe_label}.png'), dpi=150)
+                            plt.close()
+                            print(f"  > [{label}] Efficiency vs Specificity scatter saved ({len(merged)} genes).")
+                except Exception as e:
+                    print(f"  > Error creating Efficiency vs Specificity scatter: {e}")
 
         except Exception as e:
             print(f"  > Error calculating NMP: {e}. Proceeding with correlation proxy.")
@@ -397,8 +475,10 @@ def analyze_specificity(adata_reseg, config, output_dir, adata_orig=None):
     print("  > Gene correlation heatmaps saved.")
 
 
-def analyze_positivity(adata_reseg, output_dir, sample_tag, adata_orig=None):
+def analyze_positivity(adata_reseg, output_dir, sample_tag, adata_orig=None, comp_config=None):
     """Gene detection rates (fraction of positive cells) + cluster-level violin plots."""
+    if comp_config is None:
+        comp_config = {}
     datasets = [('Resegmented', adata_reseg)]
     if adata_orig is not None:
         datasets.append(('Original', adata_orig))
@@ -430,15 +510,34 @@ def analyze_positivity(adata_reseg, output_dir, sample_tag, adata_orig=None):
     plt.close()
 
     # --- 4-4b. Preprocessing + Leiden clustering ---
-    print("  > Running preprocessing for cluster-level positivity analysis...")
+    # Configurable params matching notebook defaults: n_neighbors=8, n_pcs=0, resolution=2.2, min_dist=0.1
+    pos_config = comp_config.get('positivity', {})
+    n_neighbors = pos_config.get('n_neighbors', 8)
+    n_pcs = pos_config.get('n_pcs', 0)
+    leiden_resolution = pos_config.get('leiden_resolution', 2.2)
+    umap_min_dist = pos_config.get('umap_min_dist', 0.1)
+    min_counts = pos_config.get('min_counts', 10)
+    min_genes = pos_config.get('min_genes', 3)
+
+    print(f"  > Running preprocessing (n_neighbors={n_neighbors}, n_pcs={n_pcs}, "
+          f"resolution={leiden_resolution}, min_dist={umap_min_dist})...")
     try:
         ad_proc = adata_reseg.copy()
-        sc.pp.normalize_total(ad_proc)
+        # Cell filtering (matching notebook)
+        sc.pp.filter_cells(ad_proc, min_counts=min_counts)
+        sc.pp.filter_cells(ad_proc, min_genes=min_genes)
+        print(f"  > After filtering: {ad_proc.n_obs} cells (min_counts={min_counts}, min_genes={min_genes})")
+
+        ad_proc.layers['raw'] = ad_proc.X.copy()
+        sc.pp.normalize_total(ad_proc, target_sum=None)
         sc.pp.log1p(ad_proc)
-        sc.pp.pca(ad_proc)
-        sc.pp.neighbors(ad_proc)
-        sc.tl.leiden(ad_proc, resolution=1.0, key_added='leiden')
-        sc.tl.umap(ad_proc)
+        if n_pcs > 0:
+            sc.pp.pca(ad_proc)
+            sc.pp.neighbors(ad_proc, n_neighbors=n_neighbors, n_pcs=n_pcs)
+        else:
+            sc.pp.neighbors(ad_proc, n_neighbors=n_neighbors, n_pcs=0)
+        sc.tl.leiden(ad_proc, resolution=leiden_resolution, key_added='leiden')
+        sc.tl.umap(ad_proc, min_dist=umap_min_dist)
 
         top_pos_genes = adata_reseg.var.sort_values('positivity', ascending=False).head(10).index.tolist()
 
@@ -585,6 +684,20 @@ def analyze_diffusion(df_reseg, adata_reseg, output_dir, df_orig=None, adata_ori
 
     df_all = pd.concat(data_list, ignore_index=True)
 
+    # --- 4-5a+. Per-gene diffusion summary CSV ---
+    if 'Gene' in df_all.columns and df_all['Gene'].nunique() > 1:
+        gene_distance_summary = df_all.groupby(['Gene', 'Dataset'])['Distance_um'].agg(
+            mean_distance_um='mean',
+            median_distance_um='median',
+            std_distance_um='std',
+            n_transcripts='count'
+        ).reset_index()
+        gene_distance_summary.columns = ['feature_name', 'method', 'mean_distance_um',
+                                          'median_distance_um', 'std_distance_um', 'n_transcripts']
+        summary_path = os.path.join(output_dir, "diffusion_per_gene_summary.csv")
+        gene_distance_summary.to_csv(summary_path, index=False)
+        print(f"  > Per-gene diffusion summary saved to {summary_path} ({len(gene_distance_summary)} rows).")
+
     # --- 4-5b. Complementary CDF plot ---
     df_plot = df_all.copy()
     if len(df_plot) > 50000:
@@ -636,7 +749,7 @@ def analyze_diffusion(df_reseg, adata_reseg, output_dir, df_orig=None, adata_ori
 
         if len(top_heatmap_genes) > 0 and len(datasets_in_data) > 0:
             df_subset = df_all[df_all['Gene'].isin(top_heatmap_genes)]
-            pivot = df_subset.groupby(['Gene', 'Dataset'])['Distance_um'].median().reset_index()
+            pivot = df_subset.groupby(['Gene', 'Dataset'])['Distance_um'].mean().reset_index()
             pivot_wide = pivot.pivot(index='Gene', columns='Dataset', values='Distance_um')
             pivot_wide = pivot_wide.loc[pivot_wide.mean(axis=1).sort_values().index]
 
@@ -649,16 +762,54 @@ def analyze_diffusion(df_reseg, adata_reseg, output_dir, df_orig=None, adata_ori
                 xticklabels=True,
                 yticklabels=True,
             )
-            plt.title('Median Transcript-to-Centroid Distance (um): Gene x Method')
+            plt.title('Mean Transcript-to-Centroid Distance (um): Gene x Method')
             plt.xlabel('Method')
             plt.ylabel('Gene')
             plt.tight_layout()
             plt.savefig(os.path.join(output_dir, 'diffusion_gene_method_heatmap.png'), dpi=150, bbox_inches='tight')
             plt.close()
 
-            pivot_wide.to_csv(os.path.join(output_dir, 'diffusion_gene_method_median_distances.csv'))
+            pivot_wide.to_csv(os.path.join(output_dir, 'diffusion_gene_method_mean_distances.csv'))
             print(f"  > Gene x Method distance heatmap saved ({len(top_heatmap_genes)} genes).")
     else:
         print("  > Gene column not found or only one gene; skipping per-gene diffusion plots.")
+
+    # --- 4-5e. Assigned reads stacked barplot ---
+    try:
+        assignment_data = []
+        for label, df in [('Resegmented', df_reseg), ('Original', df_orig)]:
+            if df is None:
+                continue
+            # Use in_cell column if available, otherwise cell_id_reseg/cell_id > 0
+            if 'in_cell' in df.columns:
+                n_assigned = (df['in_cell'] > 0).sum()
+                n_total = len(df)
+            elif 'cell_id_reseg' in df.columns:
+                n_assigned = (df['cell_id_reseg'] > 0).sum()
+                n_total = len(df)
+            elif 'cell_id' in df.columns:
+                n_assigned = (df['cell_id'] > 0).sum()
+                n_total = len(df)
+            else:
+                continue
+            assignment_data.append({
+                'Dataset': label,
+                'In Cell': n_assigned / n_total,
+                'Unassigned': 1 - (n_assigned / n_total),
+            })
+
+        if assignment_data:
+            df_assign = pd.DataFrame(assignment_data).set_index('Dataset')
+            df_assign.plot(kind='bar', stacked=True, figsize=(6, 5),
+                           color=['#4DA1A9', '#e8e8e8'], edgecolor='black')
+            plt.title('Proportion of Reads Assigned to Cells')
+            plt.ylabel('Fraction')
+            plt.ylim([0, 1.05])
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, 'diffusion_assigned_reads_barplot.png'), dpi=150)
+            plt.close()
+            print("  > Assigned reads stacked barplot saved.")
+    except Exception as e:
+        print(f"  > Error creating assigned reads barplot: {e}")
 
     print("  > Diffusion analysis completed.")

@@ -25,6 +25,7 @@ import matplotlib.pyplot as plt
 import subprocess
 from pathlib import Path
 from scipy.sparse import issparse
+from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
 from pipeline.benchmark_utils import metrics
 
 logger = logging.getLogger("Step6_Benchmark")
@@ -222,6 +223,9 @@ def load_transcripts_as_adata(csv_path, cell_col='cell', gene_col='gene',
         adata.var_names_make_unique()
         adata.obs_names_make_unique()
 
+        # Store raw spots for proportion_of_assigned_reads (needs total transcript count)
+        adata.uns['spots'] = df[[actual_cell_col, actual_gene_col]].copy()
+
         return adata
 
     except Exception as e:
@@ -264,15 +268,19 @@ def annotate_by_majority_voting(adata_target, adata_reference,
     nn.fit(adata_reference.obsm['X_pca'])
     distances, indices = nn.kneighbors(adata_target.obsm['X_pca'])
 
-    # Per-cell majority vote
+    # Per-cell majority vote with confidence scores
     ref_labels = adata_reference.obs[ref_key].values
     cell_labels = []
+    confidence_scores = []
     for idx_row in indices:
         neighbour_labels = ref_labels[idx_row]
         values, counts = np.unique(neighbour_labels, return_counts=True)
-        cell_labels.append(values[np.argmax(counts)])
+        winner_idx = np.argmax(counts)
+        cell_labels.append(values[winner_idx])
+        confidence_scores.append(counts[winner_idx] / len(neighbour_labels))
 
     adata_target.obs['celltype_majority'] = cell_labels
+    adata_target.obs['celltype_confidence'] = confidence_scores
 
     # Per-cluster consensus
     cluster_labels = []
@@ -288,7 +296,10 @@ def annotate_by_majority_voting(adata_target, adata_reference,
         adata_target.obs[cluster_key].map(cluster_map).astype(str)
     )
 
-    logger.info("Annotation transfer complete. Added 'celltype_majority' and 'celltype_cluster'.")
+    logger.info(
+        "Annotation transfer complete. Added 'celltype_majority', "
+        "'celltype_confidence', and 'celltype_cluster'."
+    )
     return adata_target
 
 
@@ -326,6 +337,12 @@ def preprocess_benchmark(adata, config):
 
     sc.pp.normalize_total(adata, target_sum=target_sum)
     sc.pp.log1p(adata)
+
+    # HVG selection (matching notebook's preprocess_adata defaults)
+    hvg = pp.get("hvg", True)
+    if hvg:
+        sc.pp.highly_variable_genes(adata, min_mean=0.3, max_mean=7, min_disp=-0.5)
+        logger.info(f"  HVG: {adata.var['highly_variable'].sum()} / {adata.shape[1]} genes selected")
 
     if scale:
         sc.pp.scale(adata)
@@ -486,6 +503,65 @@ def _save_counts_violin(adata, output_dir):
     logger.info(f"Saved counts violin plot to {out_path}")
 
 
+# --- 6-6e. Spatial scatter coloured by cell type (notebook cell 27: map_of_clusters) ---
+def _save_spatial_celltype_map(adata, output_dir, ct_key='celltype_majority'):
+    """Spatial scatter per segmentation method, coloured by cell type (matching notebook)."""
+    if ct_key not in adata.obs.columns:
+        logger.info(f"'{ct_key}' not in adata.obs -- skipping spatial cell type map.")
+        return
+
+    x_col, y_col = None, None
+    for xc, yc in [('x_centroid', 'y_centroid'),
+                    ('x_location', 'y_location'),
+                    ('x', 'y')]:
+        if xc in adata.obs.columns and yc in adata.obs.columns:
+            x_col, y_col = xc, yc
+            break
+
+    if x_col is None:
+        logger.warning("Spatial coordinates not found -- skipping spatial cell type map.")
+        return
+
+    methods = adata.obs['segmentation'].unique()
+    celltypes = adata.obs[ct_key].unique()
+    n_methods = len(methods)
+
+    # Build a consistent color map across all panels
+    cmap = plt.cm.get_cmap('tab20', len(celltypes))
+    ct_colors = {ct: cmap(i) for i, ct in enumerate(sorted(celltypes))}
+
+    fig, axes = plt.subplots(1, n_methods, figsize=(7 * n_methods, 6))
+    if n_methods == 1:
+        axes = [axes]
+
+    for ax, method in zip(axes, methods):
+        sub = adata[adata.obs['segmentation'] == method]
+        for ct in sorted(celltypes):
+            mask = sub.obs[ct_key] == ct
+            if mask.sum() == 0:
+                continue
+            ax.scatter(
+                sub.obs.loc[mask, x_col].values,
+                sub.obs.loc[mask, y_col].values,
+                s=0.3, alpha=0.5, color=ct_colors[ct],
+                label=ct, rasterized=True
+            )
+        ax.set_title(f"{method} ({ct_key})")
+        ax.set_aspect('equal')
+        ax.invert_yaxis()
+
+    # Single legend for all panels
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='center right', fontsize=6, markerscale=5,
+               bbox_to_anchor=(1.12, 0.5))
+    fig.suptitle("Spatial map by cell type per segmentation", fontsize=14)
+    fig.tight_layout()
+    out_path = os.path.join(output_dir, "spatial_celltype_map.png")
+    fig.savefig(out_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    logger.info(f"Saved spatial cell type map to {out_path}")
+
+
 # --- Entry Point ---
 
 def run_step6(config):
@@ -593,6 +669,8 @@ def run_step6(config):
         if 'raw' in subset.layers:
             results[f'{seg_method}_median_reads'] = metrics.median_reads_cells(subset)
             results[f'{seg_method}_median_genes'] = metrics.median_genes_cells(subset)
+            results[f'{seg_method}_p5_reads'] = metrics.percentile_5th_reads_cells(subset)
+            results[f'{seg_method}_p5_genes'] = metrics.percentile_5th_genes_cells(subset)
         else:
             logger.warning(
                 f"layers['raw'] missing for '{seg_method}' -- "
@@ -602,10 +680,95 @@ def run_step6(config):
         if 'spots' in subset.uns:
             results[f'{seg_method}_assigned_prop'] = metrics.proportion_of_assigned_reads(subset)
 
+        # Clustering quality metrics (silhouette, Calinski-Harabasz, Davies-Bouldin)
+        if 'X_pca' in subset.obsm and 'leiden' in subset.obs.columns:
+            labels = subset.obs['leiden'].astype('category').cat.codes.values
+            n_labels = len(np.unique(labels))
+            if n_labels >= 2 and n_labels < subset.shape[0]:
+                try:
+                    X_pca = subset.obsm['X_pca']
+                    results[f'{seg_method}_silhouette'] = silhouette_score(X_pca, labels)
+                    results[f'{seg_method}_calinski_harabasz'] = calinski_harabasz_score(X_pca, labels)
+                    results[f'{seg_method}_davies_bouldin'] = davies_bouldin_score(X_pca, labels)
+                    logger.info(
+                        f"  [{seg_method}] Silhouette={results[f'{seg_method}_silhouette']:.3f}, "
+                        f"CH={results[f'{seg_method}_calinski_harabasz']:.1f}, "
+                        f"DB={results[f'{seg_method}_davies_bouldin']:.3f}"
+                    )
+                except Exception as e:
+                    logger.warning(f"  [{seg_method}] Clustering quality metrics failed: {e}")
+
+    # --- NMP metrics (requires scRNA-seq reference with raw layer) ---
+    sc_ref_path = config.get("comparison", {}).get("sc_reference_path")
+    if not sc_ref_path:
+        sc_ref_path = config.get("benchmark", {}).get("sc_reference_path")
+
+    ct_key_for_nmp = 'celltype_majority' if 'celltype_majority' in adata.obs.columns else None
+    if sc_ref_path and os.path.exists(sc_ref_path) and ct_key_for_nmp:
+        logger.info(f"Computing NMP metrics using scRNA-seq reference: {sc_ref_path}")
+        try:
+            adata_sc = sc.read_h5ad(sc_ref_path)
+            if 'raw' not in adata_sc.layers:
+                adata_sc.layers['raw'] = adata_sc.X.copy()
+
+            for seg_method in adata.obs['segmentation'].unique():
+                subset = adata[adata.obs['segmentation'] == seg_method].copy()
+                if 'raw' not in subset.layers:
+                    continue
+                try:
+                    nmp_cells = metrics.negative_marker_purity_cells(
+                        subset, adata_sc, key=ct_key_for_nmp, pipeline_output=True)
+                    results[f'{seg_method}_nmp_cells'] = nmp_cells
+                    logger.info(f"  [{seg_method}] NMP (cells) = {nmp_cells}")
+                except Exception as e:
+                    logger.warning(f"  [{seg_method}] NMP cells failed: {e}")
+
+                try:
+                    nmp_reads = metrics.negative_marker_purity_reads(
+                        subset, adata_sc, key=ct_key_for_nmp, pipeline_output=True)
+                    results[f'{seg_method}_nmp_reads'] = nmp_reads
+                    logger.info(f"  [{seg_method}] NMP (reads) = {nmp_reads}")
+                except Exception as e:
+                    logger.warning(f"  [{seg_method}] NMP reads failed: {e}")
+        except Exception as e:
+            logger.warning(f"NMP computation failed: {e}")
+    elif ct_key_for_nmp is None:
+        logger.info("Skipping NMP: no cell type annotation available (run annotation transfer first).")
+    else:
+        logger.info("Skipping NMP: no scRNA-seq reference provided (comparison.sc_reference_path).")
+
     metrics_df = pd.DataFrame([results])
     metrics_file = os.path.join(output_dir, "benchmark_metrics.csv")
     metrics_df.to_csv(metrics_file, index=False)
     logger.info(f"Saved metrics to {metrics_file}")
+
+    # --- Marker gene ranking per segmentation method (notebook preprocess_adata) ---
+    try:
+        sc.tl.rank_genes_groups(adata, groupby='segmentation', method='wilcoxon',
+                                use_raw=True, key_added='rank_genes_segmentation')
+        deg_path = os.path.join(output_dir, "marker_genes_by_segmentation.png")
+        sc.pl.rank_genes_groups(adata, key='rank_genes_segmentation', show=False,
+                                save=False, n_genes=10)
+        plt.savefig(deg_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        logger.info(f"Saved marker gene ranking plot: {deg_path}")
+    except Exception as e:
+        logger.warning(f"Marker gene ranking failed: {e}")
+        plt.close('all')
+
+    if 'celltype_majority' in adata.obs.columns:
+        try:
+            sc.tl.rank_genes_groups(adata, groupby='celltype_majority', method='wilcoxon',
+                                    use_raw=True, key_added='rank_genes_celltype')
+            deg_ct_path = os.path.join(output_dir, "marker_genes_by_celltype.png")
+            sc.pl.rank_genes_groups(adata, key='rank_genes_celltype', show=False,
+                                    save=False, n_genes=10)
+            plt.savefig(deg_ct_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            logger.info(f"Saved celltype marker gene plot: {deg_ct_path}")
+        except Exception as e:
+            logger.warning(f"Celltype marker gene ranking failed: {e}")
+            plt.close('all')
 
     # --- 6-6. Visualizations ---
     logger.info("Generating visualizations...")
@@ -613,6 +776,7 @@ def run_step6(config):
     _save_spatial_map(adata, output_dir)
     _save_celltype_barplot(adata, output_dir, ct_key='celltype_majority')
     _save_counts_violin(adata, output_dir)
+    _save_spatial_celltype_map(adata, output_dir)
 
     logger.info("Step 6 Completed Successfully.")
 
