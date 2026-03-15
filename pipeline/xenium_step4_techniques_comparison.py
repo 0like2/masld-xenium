@@ -343,30 +343,65 @@ def analyze_efficiency(adata_reseg, output_dir, adata_orig=None, comp_config=Non
 
                 df_ratio.to_csv(os.path.join(output_dir, 'efficiency_expression_ratio.csv'), index=False)
 
-                plt.figure(figsize=(8, 6))
-                plt.hist(df_ratio['expression_ratio'].clip(upper=5), bins=50, edgecolor='black')
-                plt.axvline(x=1.0, color='red', linestyle='--', label='Ratio = 1')
-                plt.title('Per-Gene Expression Ratio (ST mean / scRNA median, raw)')
-                plt.xlabel('Expression Ratio (clipped at 5)')
-                plt.ylabel('Number of Genes')
-                plt.legend()
-                plt.savefig(os.path.join(output_dir, 'efficiency_expression_ratio.png'))
-                plt.close()
+                fig, ax = plt.subplots(figsize=(8, 6))
+                ratio_vals = df_ratio['expression_ratio'].clip(upper=5)
+                counts, bin_edges, _ = ax.hist(ratio_vals, bins=50, edgecolor='black')
+                ax.axvline(x=1.0, color='red', linestyle='--', label='Ratio = 1')
 
-                # C2-b: ST vs scRNAseq expression scatter (log-log + identity line)
+                # Median ratio
+                median_ratio = float(ratio_vals.median())
+                ax.axvline(x=median_ratio, color='green', linestyle='-', alpha=0.8,
+                           label=f'Median = {median_ratio:.2f}')
+
+                # Peak bin annotation
+                peak_idx = int(np.argmax(counts))
+                peak_x = (bin_edges[peak_idx] + bin_edges[peak_idx + 1]) / 2
+                peak_y = counts[peak_idx]
+                ax.axvline(x=peak_x, color='orange', linestyle=':', alpha=0.8,
+                           label=f'Peak = {peak_x:.2f}')
+                ax.annotate(f'peak={peak_x:.2f}', xy=(peak_x, peak_y),
+                            xytext=(peak_x + 0.3, peak_y * 0.9),
+                            arrowprops=dict(arrowstyle='->', color='orange'),
+                            fontsize=9, color='orange')
+
+                ax.set_title('Per-Gene Expression Ratio (ST mean / scRNA median, raw)')
+                ax.set_xlabel('Expression Ratio (clipped at 5)')
+                ax.set_ylabel('Number of Genes')
+                ax.legend(fontsize=8)
+                fig.savefig(os.path.join(output_dir, 'efficiency_expression_ratio.png'), dpi=150)
+                plt.close(fig)
+
+                # C2-b: ST vs scRNAseq expression scatter (log-log + identity line + regression)
                 try:
                     fig, ax = plt.subplots(figsize=(8, 8))
                     mask_pos = (df_ratio['st_mean_raw'] > 0) & (df_ratio['sc_median_raw'] > 0)
                     df_pos = df_ratio[mask_pos]
-                    ax.scatter(np.log10(df_pos['sc_median_raw']), np.log10(df_pos['st_mean_raw']),
-                               s=10, alpha=0.5, edgecolors='none')
+                    log10_sc = np.log10(df_pos['sc_median_raw'].values)
+                    log10_st = np.log10(df_pos['st_mean_raw'].values)
+                    ax.scatter(log10_sc, log10_st, s=10, alpha=0.5, edgecolors='none')
+
                     lims = [min(ax.get_xlim()[0], ax.get_ylim()[0]),
                             max(ax.get_xlim()[1], ax.get_ylim()[1])]
                     ax.plot(lims, lims, 'r--', alpha=0.7, label='identity')
+
+                    # Regression line
+                    slope, intercept = np.polyfit(log10_sc, log10_st, 1)
+                    x_fit = np.linspace(lims[0], lims[1], 100)
+                    ax.plot(x_fit, slope * x_fit + intercept, 'b-', alpha=0.7,
+                            label=f'regression (slope={slope:.2f})')
+
+                    # Count genes above/below identity line
+                    n_above = int((log10_st > log10_sc).sum())  # ST > scRNA
+                    n_below = int((log10_st < log10_sc).sum())  # scRNA > ST
+                    box_text = f"ST > scRNA: {n_above} genes\nscRNA > ST: {n_below} genes"
+                    ax.text(0.02, 0.97, box_text, transform=ax.transAxes, fontsize=9,
+                            verticalalignment='top',
+                            bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.7))
+
                     ax.set_xlabel('log10(scRNA median, raw)')
                     ax.set_ylabel('log10(ST mean, raw)')
                     ax.set_title('ST vs scRNAseq Expression (log-log)')
-                    ax.legend()
+                    ax.legend(loc='lower right')
                     fig.tight_layout()
                     fig.savefig(os.path.join(output_dir, 'efficiency_st_vs_sc_scatter.png'), dpi=150)
                     plt.close(fig)
@@ -447,32 +482,7 @@ def analyze_efficiency(adata_reseg, output_dir, adata_orig=None, comp_config=Non
     else:
         print("  > No region/spatial_annotation column found. Skipping region-based analysis.")
 
-    # C2-d: Reseg vs Original boxplot (genes/cell, counts/cell)
-    if adata_orig is not None:
-        try:
-            fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-            box_data = pd.concat([
-                pd.DataFrame({'value': adata_reseg.obs['total_counts'], 'Dataset': 'Resegmented'}),
-                pd.DataFrame({'value': adata_orig.obs['total_counts'], 'Dataset': 'Original'}),
-            ])
-            sns.boxplot(data=box_data, x='Dataset', y='value', ax=axes[0])
-            axes[0].set_ylabel('Counts per Cell')
-            axes[0].set_title('Total Counts per Cell')
-
-            box_data_g = pd.concat([
-                pd.DataFrame({'value': adata_reseg.obs['n_genes_by_counts'], 'Dataset': 'Resegmented'}),
-                pd.DataFrame({'value': adata_orig.obs['n_genes_by_counts'], 'Dataset': 'Original'}),
-            ])
-            sns.boxplot(data=box_data_g, x='Dataset', y='value', ax=axes[1])
-            axes[1].set_ylabel('Genes per Cell')
-            axes[1].set_title('Genes Detected per Cell')
-            fig.tight_layout()
-            fig.savefig(os.path.join(output_dir, 'efficiency_reseg_vs_original_boxplot.png'), dpi=150)
-            plt.close(fig)
-            print("  > Reseg vs Original boxplot saved.")
-        except Exception as e:
-            print(f"  > Reseg vs Original boxplot failed: {e}")
-            plt.close('all')
+    # (Removed: reseg vs original boxplot - redundant with histogram comparison)
 
 
 def analyze_specificity(adata_reseg, config, output_dir, adata_orig=None):
@@ -537,17 +547,28 @@ def analyze_specificity(adata_reseg, config, output_dir, adata_orig=None):
                 df_purity_all = pd.concat(purity_dfs, ignore_index=True)
                 df_purity_all.to_csv(os.path.join(output_dir, 'specificity_nmp_per_gene_all.csv'), index=False)
 
-                plt.figure(figsize=(10, 5))
-                sns.boxplot(data=df_purity_all, x='method', y='purity', boxprops=dict(alpha=0.3))
+                fig_nmp, ax_nmp = plt.subplots(figsize=(10, 5))
+                sns.boxplot(data=df_purity_all, x='method', y='purity',
+                            boxprops=dict(alpha=0.3), ax=ax_nmp)
                 sns.stripplot(data=df_purity_all, x='method', y='purity',
-                              edgecolor='black', linewidth=0.1, s=3, jitter=0.2)
-                plt.ylim([max(0, df_purity_all['purity'].min() - 0.05), 1.05])
-                plt.title('Negative Marker Purity (NMP) per Gene')
-                plt.ylabel('Purity Score')
-                plt.xlabel('Dataset')
-                plt.tight_layout()
-                plt.savefig(os.path.join(output_dir, 'specificity_nmp_per_gene_boxplot.png'), dpi=150)
-                plt.close()
+                              edgecolor='black', linewidth=0.1, s=3, jitter=0.2, ax=ax_nmp)
+                ax_nmp.set_ylim([max(0, df_purity_all['purity'].min() - 0.05), 1.05])
+                # Guidelines at 0.8 and 0.6
+                ax_nmp.axhline(y=0.8, color='green', linestyle='--', alpha=0.7, linewidth=1)
+                ax_nmp.text(ax_nmp.get_xlim()[1] + 0.02, 0.8, '0.8 (Good)',
+                            va='center', fontsize=8, color='green', fontweight='bold',
+                            clip_on=False)
+                ax_nmp.axhline(y=0.6, color='orange', linestyle='--', alpha=0.7, linewidth=1)
+                ax_nmp.text(ax_nmp.get_xlim()[1] + 0.02, 0.6, '0.6 (Threshold)',
+                            va='center', fontsize=8, color='orange', fontweight='bold',
+                            clip_on=False)
+                ax_nmp.set_title('Negative Marker Purity (NMP) per Gene')
+                ax_nmp.set_ylabel('Purity Score')
+                ax_nmp.set_xlabel('Dataset')
+                fig_nmp.subplots_adjust(right=0.88)
+                fig_nmp.savefig(os.path.join(output_dir, 'specificity_nmp_per_gene_boxplot.png'), dpi=150,
+                                bbox_inches='tight')
+                plt.close(fig_nmp)
                 print("  > NMP per-gene boxplot saved.")
 
             # --- 4-3a-3. Efficiency vs Specificity scatter ---
@@ -589,8 +610,13 @@ def analyze_specificity(adata_reseg, config, output_dir, adata_orig=None):
 
     top_genes = adata_reseg.var['total_counts'].sort_values(ascending=False).head(50).index
 
+    corr_matrices = {}
     for label, ad in datasets:
-        adata_subset = ad[:, top_genes]
+        common_genes = [g for g in top_genes if g in ad.var_names]
+        if len(common_genes) < 5:
+            print(f"  > [{label}] Too few common genes for correlation ({len(common_genes)}). Skipping.")
+            continue
+        adata_subset = ad[:, common_genes]
         if isinstance(adata_subset.X, np.ndarray):
             X = adata_subset.X
         else:
@@ -600,13 +626,45 @@ def analyze_specificity(adata_reseg, config, output_dir, adata_orig=None):
                 X = adata_subset.X
 
         corr_matrix = np.corrcoef(X, rowvar=False)
+        corr_matrices[label] = (corr_matrix, common_genes)
 
         plt.figure(figsize=(10, 8))
-        sns.heatmap(corr_matrix, xticklabels=top_genes, yticklabels=top_genes, cmap='coolwarm', center=0)
-        plt.title(f'Gene-Gene Correlation ({label})')
+        sns.heatmap(corr_matrix, xticklabels=common_genes, yticklabels=common_genes,
+                    cmap='coolwarm', center=0, vmin=-1, vmax=1)
+        plt.title(f'Gene-Gene Correlation ({label})\n'
+                  f'Mean off-diag |r| = {np.mean(np.abs(corr_matrix[np.triu_indices_from(corr_matrix, k=1)])):.3f}')
         safe_label = label.lower().replace(' ', '_')
-        plt.savefig(os.path.join(output_dir, f'specificity_gene_correlation_{safe_label}.png'))
+        plt.xticks(fontsize=6, rotation=90)
+        plt.yticks(fontsize=6)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'specificity_gene_correlation_{safe_label}.png'), dpi=150)
         plt.close()
+
+    # Difference heatmap if both exist
+    if len(corr_matrices) == 2:
+        labels = list(corr_matrices.keys())
+        corr1, genes1 = corr_matrices[labels[0]]
+        corr2, genes2 = corr_matrices[labels[1]]
+        shared = sorted(set(genes1) & set(genes2))
+        if len(shared) >= 5:
+            idx1 = [list(genes1).index(g) for g in shared]
+            idx2 = [list(genes2).index(g) for g in shared]
+            c1 = corr1[np.ix_(idx1, idx1)]
+            c2 = corr2[np.ix_(idx2, idx2)]
+            diff = c1 - c2
+            vabs = max(0.1, np.nanmax(np.abs(diff[np.triu_indices_from(diff, k=1)])))
+            plt.figure(figsize=(10, 8))
+            sns.heatmap(diff, xticklabels=shared, yticklabels=shared,
+                        cmap='RdBu_r', center=0, vmin=-vabs, vmax=vabs)
+            mean_abs_diff = np.mean(np.abs(diff[np.triu_indices_from(diff, k=1)]))
+            plt.title(f'Correlation Difference ({labels[0]} − {labels[1]})\n'
+                      f'Mean |Δr| = {mean_abs_diff:.3f}')
+            plt.xticks(fontsize=6, rotation=90)
+            plt.yticks(fontsize=6)
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, 'specificity_gene_correlation_difference.png'), dpi=150)
+            plt.close()
+            print(f"  > Correlation difference heatmap saved (mean |Δr| = {mean_abs_diff:.3f}).")
 
     print("  > Gene correlation heatmaps saved.")
 
@@ -658,52 +716,145 @@ def analyze_positivity(adata_reseg, output_dir, sample_tag, adata_orig=None, com
     print(f"  > Running preprocessing (n_neighbors={n_neighbors}, n_pcs={n_pcs}, "
           f"resolution={leiden_resolution}, min_dist={umap_min_dist})...")
     try:
-        ad_proc = adata_reseg.copy()
-        # Cell filtering (matching notebook)
-        sc.pp.filter_cells(ad_proc, min_counts=min_counts)
-        sc.pp.filter_cells(ad_proc, min_genes=min_genes)
-        print(f"  > After filtering: {ad_proc.n_obs} cells (min_counts={min_counts}, min_genes={min_genes})")
+        # Preprocess BOTH datasets for comparison (matching notebook 3_5 pattern)
+        processed = {}
+        for ds_label, ds_adata in datasets:
+            ad_tmp = ds_adata.copy()
+            sc.pp.filter_cells(ad_tmp, min_counts=min_counts)
+            sc.pp.filter_cells(ad_tmp, min_genes=min_genes)
+            print(f"  > [{ds_label}] After filtering: {ad_tmp.n_obs} cells "
+                  f"(min_counts={min_counts}, min_genes={min_genes})")
+            ad_tmp.layers['raw'] = ad_tmp.X.copy()
+            sc.pp.normalize_total(ad_tmp, target_sum=None)
+            sc.pp.log1p(ad_tmp)
+            if n_pcs > 0:
+                sc.pp.pca(ad_tmp)
+                sc.pp.neighbors(ad_tmp, n_neighbors=n_neighbors, n_pcs=n_pcs)
+            else:
+                sc.pp.neighbors(ad_tmp, n_neighbors=n_neighbors, n_pcs=0)
+            sc.tl.leiden(ad_tmp, resolution=leiden_resolution, key_added='leiden')
+            sc.tl.umap(ad_tmp, min_dist=umap_min_dist)
+            processed[ds_label] = ad_tmp
 
-        ad_proc.layers['raw'] = ad_proc.X.copy()
-        sc.pp.normalize_total(ad_proc, target_sum=None)
-        sc.pp.log1p(ad_proc)
-        if n_pcs > 0:
-            sc.pp.pca(ad_proc)
-            sc.pp.neighbors(ad_proc, n_neighbors=n_neighbors, n_pcs=n_pcs)
-        else:
-            sc.pp.neighbors(ad_proc, n_neighbors=n_neighbors, n_pcs=0)
-        sc.tl.leiden(ad_proc, resolution=leiden_resolution, key_added='leiden')
-        sc.tl.umap(ad_proc, min_dist=umap_min_dist)
+        # Keep ad_proc pointing to Resegmented for downstream cluster analysis
+        ad_proc = processed.get('Resegmented', list(processed.values())[0])
 
+        # Determine genes present in resegmented for consistent comparison
         top_pos_genes = adata_reseg.var.sort_values('positivity', ascending=False).head(10).index.tolist()
 
-        # --- 4-4c. Violin plots per cluster ---
+        # --- 4-4c. Violin plots: Paper-style method comparison (Figure 3a) ---
+        # Each subplot = one marker gene, x-axis = segmentation method, y-axis = expression
+        # Top genes selected by positivity (fraction of positive cells)
         if len(top_pos_genes) > 0:
-            fig, axes = plt.subplots(
-                len(top_pos_genes), 1,
-                figsize=(12, 3 * len(top_pos_genes)),
-                squeeze=False,
-            )
-            for i, gene in enumerate(top_pos_genes):
-                sc.pl.violin(ad_proc, keys=gene, groupby='leiden', ax=axes[i, 0], show=False)
-                axes[i, 0].set_title(f'{gene} (positivity={adata_reseg.var.loc[gene, "positivity"]:.3f})')
-            plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, f"{sample_tag}_positivity_violin_clusters.png"), dpi=150)
-            plt.close()
-            print(f"  > Violin plot for top {len(top_pos_genes)} positive genes saved.")
+            n_genes_violin = min(8, len(top_pos_genes))
+            genes_to_plot = top_pos_genes[:n_genes_violin]
+            ncols = min(4, n_genes_violin)
+            nrows = int(np.ceil(n_genes_violin / ncols))
 
-        # --- 4-4d. UMAP per top gene ---
+            palette = {'Resegmented': '#56018f', 'Original': '#4DA1A9'}
+            fig, axes = plt.subplots(nrows, ncols,
+                figsize=(3.5 * ncols, 4 * nrows), squeeze=False)
+
+            for idx, gene in enumerate(genes_to_plot):
+                row, col = divmod(idx, ncols)
+                ax = axes[row][col]
+
+                violin_data = []
+                for label, ad_proc_iter in processed.items():
+                    if gene not in ad_proc_iter.var_names:
+                        continue
+                    gene_idx = list(ad_proc_iter.var_names).index(gene)
+                    X = ad_proc_iter.X
+                    if hasattr(X, 'toarray'):
+                        expr = X[:, gene_idx].toarray().flatten()
+                    else:
+                        expr = X[:, gene_idx].flatten()
+                    for val in expr:
+                        violin_data.append({'Method': label, 'Expression': val})
+
+                if violin_data:
+                    df_viol = pd.DataFrame(violin_data)
+                    sns.violinplot(data=df_viol, x='Method', y='Expression',
+                                  palette=palette, ax=ax, inner='box',
+                                  linewidth=0.8, cut=0)
+                positivity_val = adata_reseg.var.loc[gene, 'positivity'] if gene in adata_reseg.var_names else 0
+                ax.set_title(f'{gene}\n(positivity={positivity_val:.2f})', fontsize=9)
+                ax.set_xlabel('')
+                if col == 0:
+                    ax.set_ylabel('Expression')
+                else:
+                    ax.set_ylabel('')
+
+            for idx in range(n_genes_violin, nrows * ncols):
+                row, col = divmod(idx, ncols)
+                axes[row][col].set_visible(False)
+
+            plt.suptitle('Gene Expression by Segmentation Method\n'
+                         '(Top genes ranked by positivity = fraction of expressing cells)',
+                         fontsize=11, y=1.03)
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, f"{sample_tag}_positivity_violin_clusters.png"),
+                       dpi=150, bbox_inches='tight')
+            plt.close()
+            print(f"  > Paper-style method comparison violin saved ({n_genes_violin} genes).")
+
+
+        # --- 4-4d. UMAP per top gene (side-by-side for each dataset) ---
+        # "Top" = genes with highest positivity (fraction of cells expressing the gene)
         n_umap_genes = min(4, len(top_pos_genes))
         if n_umap_genes > 0:
-            fig, axes = plt.subplots(1, n_umap_genes, figsize=(5 * n_umap_genes, 4))
-            if n_umap_genes == 1:
-                axes = [axes]
-            for i, gene in enumerate(top_pos_genes[:n_umap_genes]):
-                sc.pl.umap(ad_proc, color=gene, ax=axes[i], show=False, title=gene)
+            n_datasets = len(processed)
+            umap_genes = top_pos_genes[:n_umap_genes]
+
+            # Pre-compute per-gene stats for each dataset → unified color scale
+            gene_stats = {}  # gene → {label: {mean, pct_expressing}, vmin, vmax}
+            for gene in umap_genes:
+                stats = {}
+                all_max = 0
+                for label, ad_iter in processed.items():
+                    if gene in ad_iter.var_names:
+                        gi = ad_iter.var_names.get_loc(gene)
+                        X = ad_iter.X
+                        expr = X[:, gi].toarray().flatten() if hasattr(X, 'toarray') else np.asarray(X[:, gi]).flatten()
+                        stats[label] = {
+                            'mean': float(np.mean(expr)),
+                            'pct': float(np.mean(expr > 0) * 100),
+                        }
+                        all_max = max(all_max, float(np.quantile(expr[expr > 0], 0.99)) if (expr > 0).any() else 0)
+                    else:
+                        stats[label] = {'mean': 0.0, 'pct': 0.0}
+                gene_stats[gene] = {'per_ds': stats, 'vmax': all_max}
+
+            fig, axes = plt.subplots(n_datasets, n_umap_genes,
+                figsize=(5 * n_umap_genes, 4.5 * n_datasets), squeeze=False)
+            ds_labels = list(processed.keys())
+            for row_idx, (label, ad_proc_iter) in enumerate(processed.items()):
+                for col_idx, gene in enumerate(umap_genes):
+                    ax = axes[row_idx][col_idx]
+                    vmax = gene_stats[gene]['vmax']
+
+                    # Build title with per-method positivity + difference flag
+                    gs = gene_stats[gene]['per_ds']
+                    pct_vals = [gs[lb]['pct'] for lb in ds_labels]
+                    pct_diff = abs(pct_vals[0] - pct_vals[-1]) if len(pct_vals) >= 2 else 0
+                    diff_tag = '' if pct_diff > 5 else ' (similar)'
+                    pct_str = ' | '.join(f'{lb[:4]}={gs[lb]["pct"]:.0f}%' for lb in ds_labels)
+                    title = f'{gene} [{label}]\n({pct_str}){diff_tag}'
+
+                    if gene in ad_proc_iter.var_names:
+                        sc.pl.umap(ad_proc_iter, color=gene, ax=ax, show=False,
+                                   title=title, vmin=0, vmax=max(vmax, 0.01))
+                    else:
+                        ax.set_title(f'{gene} [{label}] (N/A)')
+            plt.suptitle('UMAP Expression: Top Genes by Positivity\n'
+                         '(% expressing shown per method; unified color scale)',
+                         fontsize=11, y=1.03)
             plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, f"{sample_tag}_positivity_umap_top_genes.png"), dpi=150)
+            plt.savefig(os.path.join(output_dir, f"{sample_tag}_positivity_umap_top_genes.png"),
+                       dpi=150, bbox_inches='tight')
             plt.close()
             print("  > UMAP plots for top positive genes saved.")
+
 
         # Optimal cluster per gene (highest mean expression)
         cluster_means = pd.DataFrame(index=ad_proc.var_names)
@@ -839,13 +990,49 @@ def analyze_diffusion(df_reseg, adata_reseg, output_dir, df_orig=None, adata_ori
     if len(df_plot) > 50000:
         df_plot = df_plot.sample(50000, random_state=42)
 
-    plt.figure(figsize=(8, 6))
-    sns.ecdfplot(data=df_plot, x='Distance_um', hue='Dataset', complementary=True)
-    plt.title("Transcript-to-Centroid Distance: Complementary CDF")
-    plt.xlabel("Distance (um)")
-    plt.ylabel("1 - CDF")
-    plt.savefig(os.path.join(output_dir, 'diffusion_complementary_cdf_comparison.png'), dpi=150)
-    plt.close()
+    method_colors = {}
+    palette = sns.color_palette()
+    for i, label in enumerate(df_plot['Dataset'].unique()):
+        method_colors[label] = palette[i % len(palette)]
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sns.ecdfplot(data=df_plot, x='Distance_um', hue='Dataset', complementary=True, ax=ax)
+    ax.set_xticks(np.arange(0, 35, 5))
+    ax.set_xlabel('Distance to centroid (µm)', fontsize=11)
+    ax.set_ylabel('Proportion of reads (cumulative)', fontsize=11)
+    ax.set_title('Transcript-to-Centroid Distance: Complementary CDF', fontsize=12)
+    ax.legend(fontsize=9, loc='upper right')
+
+    # Annotate intersection values at 5µm gridlines for each dataset
+    y_offset = 0.12
+    for label in df_all['Dataset'].unique():
+        dists = df_all[df_all['Dataset'] == label]['Distance_um']
+        color = method_colors.get(label, 'black')
+        median_d = np.median(dists)
+
+        # Calculate complementary CDF values at each 5µm gridline
+        grid_vals = []
+        for x_val in [5, 10, 15, 20, 25]:
+            ccdf_val = (dists > x_val).sum() / len(dists)
+            grid_vals.append(f'{x_val}µm:{ccdf_val:.2f}')
+            # Mark intersection point on plot
+            ax.plot(x_val, ccdf_val, 'o', color=color, markersize=4, zorder=5, alpha=0.8)
+            ax.annotate(f'{ccdf_val:.2f}', xy=(x_val, ccdf_val),
+                        xytext=(x_val + 0.3, ccdf_val + 0.03),
+                        fontsize=7, color=color, fontweight='bold',
+                        annotation_clip=True)
+
+        pct_5 = (dists <= 5).sum() / len(dists) * 100
+        pct_10 = (dists <= 10).sum() / len(dists) * 100
+        ax.text(0.98, y_offset,
+                f'{label}: {pct_5:.0f}% ≤5µm, {pct_10:.0f}% ≤10µm, med={median_d:.1f}µm',
+                transform=ax.transAxes, fontsize=8, ha='right', va='bottom', color=color,
+                bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7, edgecolor=color))
+        y_offset += 0.06
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(output_dir, 'diffusion_complementary_cdf_comparison.png'), dpi=150)
+    plt.close(fig)
     print("  > Complementary CDF plot saved.")
 
     # --- 4-5c. Per-gene ECDF subplots ---

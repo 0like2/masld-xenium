@@ -26,6 +26,10 @@ import scanpy as sc
 import scipy.sparse as sp
 from scipy.io import mmread
 import tifffile as tf
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -328,6 +332,123 @@ def format_background(path):
         print(f"  [WARNING] {ome_tif} not found. Cannot generate background.")
 
 
+# --- QC Visualization ---
+
+def _plot_qc_violin_counts(adata, output_dir, sample_tag, min_counts, min_genes):
+    """Before/After violin plot for total transcript counts per cell."""
+    try:
+        counts = adata.obs['total_counts'].values
+        passed = (counts >= min_counts) & (adata.obs['n_genes_by_counts'].values >= min_genes)
+        n_before = len(counts)
+        n_after = int(passed.sum())
+
+        df = pd.DataFrame({
+            'Total Transcript Counts': np.concatenate([counts, counts[passed]]),
+            'Stage': ['Before Filtering'] * n_before + ['After Filtering'] * n_after,
+        })
+
+        fig, ax = plt.subplots(figsize=(6, 7))
+        sns.violinplot(data=df, x='Stage', y='Total Transcript Counts',
+                       hue='Stage', palette={'Before Filtering': '#d62728', 'After Filtering': '#2ca02c'},
+                       inner='quartile', linewidth=1.2, ax=ax, legend=False,
+                       order=['Before Filtering', 'After Filtering'])
+        ax.axhline(min_counts, color='k', linestyle='--', linewidth=1, alpha=0.7,
+                   label=f'min_counts = {min_counts}')
+        ax.legend(fontsize=9)
+        ax.set_title(f'{sample_tag} — Total Counts per Cell', fontsize=13)
+
+        summary = f'Before: {n_before:,} cells\nAfter: {n_after:,} cells'
+        ax.text(0.02, 0.98, summary, transform=ax.transAxes, ha='left', va='top',
+                fontsize=10, bbox=dict(boxstyle='round,pad=0.4', facecolor='white', alpha=0.85))
+
+        fig.tight_layout()
+        save_path = os.path.join(output_dir, f"{sample_tag}_step0_qc_violin_counts.png")
+        fig.savefig(save_path, dpi=200, bbox_inches='tight')
+        plt.close(fig)
+        print(f"  > QC violin (counts) saved: {save_path}")
+    except Exception as e:
+        print(f"  > [WARNING] QC violin counts plot failed: {e}")
+        plt.close('all')
+
+
+def _plot_qc_violin_genes(adata, output_dir, sample_tag, min_counts, min_genes):
+    """Before/After violin plot for number of genes detected per cell."""
+    try:
+        genes = adata.obs['n_genes_by_counts'].values
+        passed = (adata.obs['total_counts'].values >= min_counts) & (genes >= min_genes)
+        n_before = len(genes)
+        n_after = int(passed.sum())
+
+        df = pd.DataFrame({
+            'Number of Genes Detected': np.concatenate([genes, genes[passed]]),
+            'Stage': ['Before Filtering'] * n_before + ['After Filtering'] * n_after,
+        })
+
+        fig, ax = plt.subplots(figsize=(6, 7))
+        sns.violinplot(data=df, x='Stage', y='Number of Genes Detected',
+                       hue='Stage', palette={'Before Filtering': '#d62728', 'After Filtering': '#2ca02c'},
+                       inner='quartile', linewidth=1.2, ax=ax, legend=False,
+                       order=['Before Filtering', 'After Filtering'])
+        ax.axhline(min_genes, color='k', linestyle='--', linewidth=1, alpha=0.7,
+                   label=f'min_genes = {min_genes}')
+        ax.legend(fontsize=9)
+        ax.set_title(f'{sample_tag} — Genes Detected per Cell', fontsize=13)
+
+        summary = f'Before: {n_before:,} cells\nAfter: {n_after:,} cells'
+        ax.text(0.02, 0.98, summary, transform=ax.transAxes, ha='left', va='top',
+                fontsize=10, bbox=dict(boxstyle='round,pad=0.4', facecolor='white', alpha=0.85))
+
+        fig.tight_layout()
+        save_path = os.path.join(output_dir, f"{sample_tag}_step0_qc_violin_genes.png")
+        fig.savefig(save_path, dpi=200, bbox_inches='tight')
+        plt.close(fig)
+        print(f"  > QC violin (genes) saved: {save_path}")
+    except Exception as e:
+        print(f"  > [WARNING] QC violin genes plot failed: {e}")
+        plt.close('all')
+
+
+def _plot_qc_scatter(adata, output_dir, sample_tag, min_counts, min_genes):
+    """Scatter plot of genes vs counts with pass/fail coloring."""
+    try:
+        counts = adata.obs['total_counts'].values
+        genes = adata.obs['n_genes_by_counts'].values
+        passed = (counts >= min_counts) & (genes >= min_genes)
+        n_total = len(passed)
+        n_kept = int(passed.sum())
+        n_removed = n_total - n_kept
+        pct_kept = n_kept / n_total * 100 if n_total > 0 else 0
+        pct_removed = 100 - pct_kept
+
+        fig, ax = plt.subplots(figsize=(8, 7))
+        ax.scatter(genes[~passed], counts[~passed], s=1, alpha=0.3, c='#d4a574',
+                   label=f'Removed ({n_removed:,})', rasterized=True)
+        ax.scatter(genes[passed], counts[passed], s=1, alpha=0.3, c='#2ca02c',
+                   label=f'Kept ({n_kept:,})', rasterized=True)
+        ax.axvline(min_genes, color='k', linestyle='--', linewidth=1, alpha=0.6)
+        ax.axhline(min_counts, color='k', linestyle='--', linewidth=1, alpha=0.6)
+        ax.set_xlabel('Number of Genes Detected')
+        ax.set_ylabel('Total Transcript Counts')
+        ax.set_title(f'{sample_tag} — Genes vs Counts per Cell (QC)', fontsize=13)
+        ax.legend(markerscale=8, fontsize=9, loc='upper left')
+
+        summary = (f'Total: {n_total:,} cells\n'
+                   f'Kept: {n_kept:,} ({pct_kept:.1f}%)\n'
+                   f'Removed: {n_removed:,} ({pct_removed:.1f}%)')
+        ax.text(0.98, 0.02, summary, transform=ax.transAxes, ha='right', va='bottom',
+                fontsize=10, fontweight='bold',
+                bbox=dict(boxstyle='round,pad=0.4', facecolor='wheat', alpha=0.9))
+
+        fig.tight_layout()
+        save_path = os.path.join(output_dir, f"{sample_tag}_step0_qc_scatter.png")
+        fig.savefig(save_path, dpi=200, bbox_inches='tight')
+        plt.close(fig)
+        print(f"  > QC scatter saved: {save_path}")
+    except Exception as e:
+        print(f"  > [WARNING] QC scatter plot failed: {e}")
+        plt.close('all')
+
+
 # --- Entry point ---
 
 def run_step0(config):
@@ -360,6 +481,11 @@ def run_step0(config):
 
     print(f"  > Calculating QC metrics...")
     sc.pp.calculate_qc_metrics(adata, percent_top=None, log1p=False, inplace=True)
+
+    # QC visualization (before filtering)
+    _plot_qc_violin_counts(adata, output_dir, sample_tag, mincounts, mingenes)
+    _plot_qc_violin_genes(adata, output_dir, sample_tag, mincounts, mingenes)
+    _plot_qc_scatter(adata, output_dir, sample_tag, mincounts, mingenes)
 
     print(f"  > Filtering cells (min_counts={mincounts}, min_genes={mingenes})...")
     n_cells_before = adata.n_obs

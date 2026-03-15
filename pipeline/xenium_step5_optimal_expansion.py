@@ -57,11 +57,132 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
+def _load_p2r_spatial_domains(adata, output_dir, sample_tag, n_clusters=50, max_dist_um=500.0):
+    """Map cells to nearest P2R bin cluster as spatial domain proxy.
+
+    Loads P2R bin-level h5ad from Step 2, maps each cell to its nearest
+    bin via KDTree, assigns the bin's cluster label as the cell's domain.
+    Cells farther than max_dist_um from any bin get NaN.
+
+    If n_clusters is smaller than the smallest available P2R file (e.g., 8
+    requested but only k=50 exists), the bins are spatially meta-clustered:
+    KMeans on bin spatial coordinates groups nearby bins into n_clusters
+    contiguous spatial regions.  This produces anatomically meaningful
+    domains where each region spans multiple cell types, yielding a clear
+    gap between nuclear and background expression profiles for turnover
+    detection.
+    """
+    parent_dir = os.path.dirname(output_dir)
+    p2r_dir = os.path.join(parent_dir, "step2_segmentation_free")
+
+    # --- Find the best available P2R file ---
+    p2r_path = os.path.join(p2r_dir,
+                            f"{sample_tag}_step2_points2regions_k{n_clusters}_bins.h5ad")
+    source_k = n_clusters  # cluster count in the file we load
+    needs_metaclustering = False
+
+    if not os.path.exists(p2r_path):
+        # Search for available P2R files and pick the smallest k >= n_clusters,
+        # or the smallest k available if all are larger than n_clusters.
+        import glob as _glob
+        candidates = sorted(_glob.glob(
+            os.path.join(p2r_dir, f"{sample_tag}_step2_points2regions_k*_bins.h5ad")))
+        available_ks = []
+        for c in candidates:
+            try:
+                k_str = os.path.basename(c).split('_k')[1].split('_bins')[0]
+                available_ks.append((int(k_str), c))
+            except (IndexError, ValueError):
+                continue
+
+        if not available_ks:
+            print(f"    - No P2R bins files found in {p2r_dir}")
+            return None
+
+        available_ks.sort(key=lambda x: x[0])
+        # Prefer the smallest available k (finest resolution for meta-clustering)
+        source_k, p2r_path = available_ks[0]
+        needs_metaclustering = (n_clusters < source_k)
+        print(f"    - Requested k={n_clusters} not found. Using k={source_k} "
+              f"{'(will meta-cluster → ' + str(n_clusters) + ' domains)' if needs_metaclustering else ''}")
+
+    print(f"    - Loading P2R bins from: {p2r_path}")
+    p2r_bins = sc.read_h5ad(p2r_path)
+    bin_coords = p2r_bins.obsm['spatial']  # (n_bins, 2)
+
+    cluster_key = f'points2regions_{source_k}'
+    if cluster_key not in p2r_bins.obs.columns:
+        # Try first matching column
+        candidates_cols = [c for c in p2r_bins.obs.columns if 'points2regions' in c]
+        if not candidates_cols:
+            print(f"    - No points2regions column found in P2R bins. Available: {list(p2r_bins.obs.columns)}")
+            return None
+        cluster_key = candidates_cols[0]
+
+    bin_clusters = p2r_bins.obs[cluster_key].values.copy()
+
+    # --- Spatial meta-clustering: merge bins → n_clusters by position ---
+    if needs_metaclustering and n_clusters < len(np.unique(bin_clusters)):
+        from sklearn.cluster import KMeans
+
+        n_orig = len(np.unique(bin_clusters))
+        print(f"    - Spatial meta-clustering {n_orig} P2R clusters → {n_clusters} domains "
+              f"(KMeans on bin spatial coordinates)")
+
+        # Cluster bins by their spatial position, not expression.
+        # This produces contiguous spatial regions where each domain
+        # contains a diverse mix of cell types — critical for turnover.
+        km = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        spatial_labels = km.fit_predict(bin_coords)
+
+        bin_clusters = np.array([f"region_{s}" for s in spatial_labels])
+
+        # Report cluster sizes
+        meta_sizes = pd.Series(spatial_labels).value_counts().sort_index()
+        print(f"    - Spatial domain sizes (# bins each): "
+              f"{dict(zip([f'region_{i}' for i in meta_sizes.index], meta_sizes.values))}")
+
+    # Get cell coordinates: obsm['spatial'] or obs x/y_centroid columns
+    if 'spatial' in adata.obsm:
+        cell_coords = adata.obsm['spatial']  # (n_cells, 2) — µm
+    elif 'x_centroid' in adata.obs.columns and 'y_centroid' in adata.obs.columns:
+        cell_coords = np.column_stack([
+            adata.obs['x_centroid'].values.astype(float),
+            adata.obs['y_centroid'].values.astype(float)
+        ])
+    else:
+        print("    - No spatial coordinates found in adata (obsm['spatial'] or obs x/y_centroid)")
+        return None
+
+    # Auto-detect pixel vs µm mismatch: if cell range >> bin range, convert px→µm
+    cell_range = cell_coords[:, 0].max() - cell_coords[:, 0].min()
+    bin_range = bin_coords[:, 0].max() - bin_coords[:, 0].min()
+    if cell_range > bin_range * 2:
+        scale = cell_range / bin_range
+        print(f"    - Coordinate mismatch detected (cell_range={cell_range:.0f}, "
+              f"bin_range={bin_range:.0f}, ratio={scale:.2f}x). Converting cell coords px→µm.")
+        cell_coords = cell_coords / scale
+
+    tree = cKDTree(bin_coords)
+    dists, idxs = tree.query(cell_coords, k=1)
+
+    domains = pd.Series(bin_clusters[idxs], index=adata.obs.index, dtype=str)
+    domains[dists > max_dist_um] = np.nan  # Too far from any P2R bin
+
+    n_assigned = domains.notna().sum()
+    n_unique = len(np.unique(bin_clusters))
+    print(f"    - P2R domain mapping: {n_assigned}/{len(domains)} cells assigned "
+          f"({n_assigned/len(domains):.1%}), {n_unique} domains")
+
+    return domains
+
+
 # --- Correlation-based Turnover / Crossover Analysis ---
 
 def calculate_turnover(reads_assigned, reads_not_assigned, output_dir, sample_tag,
                        min_reads_per_domain=5000, diff_threshold=0.1,
-                       celltype_colors=None):
+                       min_reads_per_bin=1, celltype_colors=None,
+                       threshold_mode="absolute"):
     """
     Correlation-based turnover/crossover for each cell-type x domain.
 
@@ -70,7 +191,7 @@ def calculate_turnover(reads_assigned, reads_not_assigned, output_dir, sample_ta
       2. Get nuclear-expression profile (overlaps_nucleus == 1).
       3. Get background profile from unassigned reads.
       4. Correlate expression at each distance bin with nuclear and background.
-      5. Turnover distance = first bin where (corr_nuc - corr_back) < diff_threshold.
+      5. Turnover distance detection (mode-dependent, see threshold_mode).
       6. Compute nuclei_size and cell_size via dist_nuc.
 
     Parameters
@@ -78,6 +199,11 @@ def calculate_turnover(reads_assigned, reads_not_assigned, output_dir, sample_ta
     celltype_colors : dict or None
         Mapping from cell type name to color (hex). If available from
         adata.uns['{celltype_key}_colors'], passed here for consistent plots.
+    threshold_mode : str
+        Turnover detection mode:
+        - "absolute": diff < diff_threshold (notebook method, default)
+        - "crossover": diff < 0 (paper method, exact intersection)
+        - "relative": diff < diff_threshold * peak_diff (half-life method)
 
     Returns (turnover_summary, per_celltype_df, optimal_expansion_value).
     """
@@ -162,7 +288,7 @@ def calculate_turnover(reads_assigned, reads_not_assigned, output_dir, sample_ta
             # 3. Background expression for this domain
             if dom not in background_express.index:
                 continue
-            bck_sub = background_express.copy()
+            bck_sub = background_express
 
             # Align columns across all three matrices
             common_genes = (
@@ -174,6 +300,22 @@ def calculate_turnover(reads_assigned, reads_not_assigned, output_dir, sample_ta
                 continue
 
             common_genes = sorted(common_genes)
+
+            # Remove dominant housekeeping genes that compress correlation range.
+            # Genes like MTRNR2L12/MTRNR2L8 can account for >50% of reads,
+            # making all profiles converge to ~0.97 correlation regardless of
+            # cell-type composition.  Excluding them widens the dynamic range
+            # from ~0.03 to ~0.2, enabling reliable turnover detection.
+            bck_total = bck_sub.loc[dom, common_genes].values.astype(float)
+            bck_sum = bck_total.sum()
+            if bck_sum > 0:
+                bck_frac = bck_total / bck_sum
+                dominant_mask = bck_frac > 0.15  # genes > 15% of background reads
+                if dominant_mask.sum() > 0:
+                    keep_genes = [g for g, m in zip(common_genes, dominant_mask) if not m]
+                    if len(keep_genes) >= 20:
+                        common_genes = keep_genes
+
             reads_ctd_nucl = reads_ctd_nucl[common_genes]
             bck_sub = bck_sub[common_genes]
             expression_distances = expression_distances[common_genes]
@@ -186,6 +328,12 @@ def calculate_turnover(reads_assigned, reads_not_assigned, output_dir, sample_ta
             corr_bck_list = []
             for dist in expression_distances.index:
                 dist_vec = expression_distances.loc[dist, :].values.astype(float)
+                n_reads_at_dist = dist_vec.sum()
+                # Skip bins with too few reads — correlation is unreliable
+                if n_reads_at_dist < min_reads_per_bin:
+                    corr_nuc_list.append(np.nan)
+                    corr_bck_list.append(np.nan)
+                    continue
                 if np.std(dist_vec) == 0 or np.std(nuc_vec) == 0:
                     corr_nuc_list.append(np.nan)
                 else:
@@ -223,13 +371,51 @@ def calculate_turnover(reads_assigned, reads_not_assigned, output_dir, sample_ta
                 plt.close('all')
 
             # --- 5-8c. Turnover distance detection ---
-            below_threshold = summary.loc[summary['diff'] < diff_threshold, :]
-            try:
-                tdistance = np.nanmin(below_threshold.index)
-                if np.isnan(tdistance):
-                    tdistance = np.nanmax(summary.index)
-            except (ValueError, TypeError):
-                tdistance = np.nanmax(summary.index)
+            summary_valid = summary.dropna(subset=['diff'])
+
+            n_valid_bins = len(summary_valid)
+            n_total_bins = len(summary)
+
+            if n_valid_bins < 3:
+                tdistance = np.nan
+                print(f"      - Domain {dom}: {n_valid_bins}/{n_total_bins} valid bins — too few, skipping")
+            else:
+                # Light smoothing (window=3) for noise reduction
+                diff_smooth = summary_valid['diff'].rolling(
+                    window=3, min_periods=1, center=True).mean()
+
+                peak_diff = diff_smooth.max()
+                if peak_diff <= 0.01:
+                    # No detectable nuclear-vs-background signal
+                    tdistance = np.nan
+                    print(f"      - Domain {dom}: {n_valid_bins}/{n_total_bins} valid bins, "
+                          f"peak_diff={peak_diff:.3f} — no signal, skipping")
+                else:
+                    peak_dist = diff_smooth.idxmax()
+                    # Only look AFTER the peak for the drop
+                    after_peak = diff_smooth.loc[summary_valid.index >= peak_dist]
+
+                    if threshold_mode == "crossover":
+                        # Paper method: exact intersection where corr_nuc < corr_back
+                        below_after = after_peak < 0
+                        effective_thresh = 0
+                    elif threshold_mode == "relative":
+                        # Half-life method: diff < diff_threshold * peak_diff
+                        effective_thresh = diff_threshold * peak_diff
+                        below_after = after_peak < effective_thresh
+                    else:
+                        # "absolute" (default, notebook method): diff < diff_threshold
+                        effective_thresh = diff_threshold
+                        below_after = after_peak < effective_thresh
+
+                    if below_after.any():
+                        tdistance = below_after.index[below_after.values].min()
+                    else:
+                        tdistance = summary_valid.index.max()
+
+                    print(f"      - Domain {dom}: {n_valid_bins}/{n_total_bins} valid bins, "
+                          f"peak_diff={peak_diff:.3f}@d={peak_dist}, "
+                          f"mode={threshold_mode}, thresh={effective_thresh:.4f}, turnover={tdistance}")
 
             turnover_summ.loc[dom, celltype] = tdistance
             tdistanceall.append(tdistance)
@@ -253,11 +439,39 @@ def calculate_turnover(reads_assigned, reads_not_assigned, output_dir, sample_ta
     })
 
     # --- 5-8d. Optimal expansion = turnover − nuclei_size ---
-    optimal_expansion = np.nanmean(meand_celltype) - np.nanmean(nuclimall)
+    # Use nanmean (matching notebook cell 32: np.nanmean)
+    valid_turnover = [t for t in meand_celltype if not np.isnan(t)]
+    valid_nuc = [n for n in nuclimall if not np.isnan(n)]
+    n_valid_ct = len(valid_turnover)
+    n_total_ct = len(meand_celltype)
 
-    print(f"\n    [Turnover] Mean turnover distance : {np.nanmean(meand_celltype):.3f}")
-    print(f"    [Turnover] Mean nuclei size       : {np.nanmean(nuclimall):.3f}")
-    print(f"    [Turnover] >>> Optimal expansion   : {optimal_expansion:.3f}")
+    if n_valid_ct == 0:
+        logger.warning(
+            f"No cell types had a valid crossover out of {n_total_ct} total. "
+            f"Correlation range likely too compressed for this gene panel. "
+            f"Consider lowering diff_threshold (currently {diff_threshold}) "
+            f"or changing threshold_mode (currently '{threshold_mode}')."
+        )
+        mean_turnover = np.nan
+        mean_nuc_size = np.nanmean(nuclimall) if valid_nuc else np.nan
+        optimal_expansion = 0.0
+    else:
+        mean_turnover = np.nanmean(meand_celltype)
+        mean_nuc_size = np.nanmean(nuclimall)
+        optimal_expansion = mean_turnover - mean_nuc_size
+
+    print(f"\n    [Turnover] Valid cell types       : {n_valid_ct}/{n_total_ct}")
+    print(f"    [Turnover] Mean turnover dist     : {mean_turnover}")
+    print(f"    [Turnover] Mean nuclei size       : {mean_nuc_size}")
+    print(f"    [Turnover] >>> Optimal expansion   : {optimal_expansion}")
+
+    if optimal_expansion < 0:
+        logger.warning(
+            f"Optimal expansion is negative ({optimal_expansion:.3f}). "
+            f"Turnover ({mean_turnover:.3f}) < nuclei_size ({mean_nuc_size:.3f}). "
+            f"Clamping to 0."
+        )
+        optimal_expansion = 0.0
 
     # --- 5-8e. Summary barplot + CSVs (matching notebook cells 33-39) ---
     try:
@@ -303,6 +517,7 @@ def calculate_turnover(reads_assigned, reads_not_assigned, output_dir, sample_ta
                 color='#D83066', edgecolor=None, alpha=0.7, s=80, label='nuclei_size', ax=ax, zorder=3
             )
             ax.set_xlabel("Distance")
+            ax.set_ylabel("Cell type")
             ax.set_title("Turnover per cell type (per-domain scores)")
             ax.legend(loc='lower right')
             summary_plot_path = os.path.join(output_dir, f"{sample_tag}_step5_turnover_barplot.png")
@@ -336,6 +551,7 @@ def calculate_turnover(reads_assigned, reads_not_assigned, output_dir, sample_ta
                     color='#D83066', edgecolor=None, alpha=0.7, s=80, label='nuclei_size', ax=ax2, zorder=3
                 )
                 ax2.set_xlabel("Distance")
+                ax2.set_ylabel("Cell type")
                 ax2.set_title("Turnover (cell types with >5 domains)")
                 ax2.legend(loc='lower right')
                 filt_plot_path = os.path.join(output_dir, f"{sample_tag}_step5_turnover_barplot_filtered.png")
@@ -358,14 +574,108 @@ def calculate_turnover(reads_assigned, reads_not_assigned, output_dir, sample_ta
     txt_opt = os.path.join(output_dir, f"{sample_tag}_step5_optimal_expansion.txt")
     with open(txt_opt, 'w') as fh:
         fh.write(f"optimal_expansion\t{optimal_expansion}\n")
-        fh.write(f"mean_turnover\t{np.nanmean(meand_celltype)}\n")
-        fh.write(f"mean_nuclei_size\t{np.nanmean(nuclimall)}\n")
+        fh.write(f"median_turnover\t{mean_turnover}\n")
+        fh.write(f"median_nuclei_size\t{mean_nuc_size}\n")
+        fh.write(f"valid_celltypes\t{n_valid_ct}/{n_total_ct}\n")
         fh.write(f"overlaps_nucleus_proxy\t{used_proxy}\n")
         if used_proxy:
             fh.write(f"proxy_threshold_median_distance\t{proxy_threshold}\n")
     print(f"    [Turnover] Saved optimal expansion value:  {txt_opt}")
 
     return turnover_summ, per_celltype, optimal_expansion
+
+
+# --- Label Transfer from scRNA-seq Reference ---
+
+def _transfer_celltype_labels(adata, sc_ref_path, ref_celltype_key='subclass_label',
+                               n_neighbors=15):
+    """Transfer cell type labels from scRNA-seq reference via kNN in shared gene PCA space.
+
+    Adds 'celltype' and 'celltype_confidence' columns to adata.obs.
+    Returns the column name on success, None on failure.
+    """
+    from sklearn.neighbors import NearestNeighbors
+    from scipy.sparse import issparse
+
+    print(f"\n    [Label Transfer] Loading scRNA reference: {sc_ref_path}")
+    adata_ref = sc.read_h5ad(sc_ref_path)
+
+    if ref_celltype_key not in adata_ref.obs.columns:
+        logger.warning("    Reference missing '%s' column. Available: %s",
+                        ref_celltype_key, list(adata_ref.obs.columns[:10]))
+        del adata_ref
+        return None
+
+    # Shared genes
+    shared_genes = sorted(adata.var_names.intersection(adata_ref.var_names))
+    print(f"    [Label Transfer] {len(shared_genes)} shared genes "
+          f"(Xenium {adata.n_vars}, reference {adata_ref.n_vars})")
+
+    if len(shared_genes) < 20:
+        logger.warning("    Too few shared genes (%d) for reliable transfer.", len(shared_genes))
+        del adata_ref
+        return None
+
+    # Prepare reference subset
+    ref_sub = adata_ref[:, shared_genes].copy()
+    valid_mask = ref_sub.obs[ref_celltype_key].notna()
+    if hasattr(ref_sub.obs[ref_celltype_key], 'str'):
+        valid_mask = valid_mask & (ref_sub.obs[ref_celltype_key].astype(str) != 'nan')
+    ref_sub = ref_sub[valid_mask].copy()
+    n_types = ref_sub.obs[ref_celltype_key].nunique()
+    print(f"    [Label Transfer] Reference: {ref_sub.n_obs} cells, {n_types} cell types")
+
+    if 'raw' in ref_sub.layers:
+        ref_sub.X = ref_sub.layers['raw'].copy()
+    if issparse(ref_sub.X):
+        ref_sub.X = np.asarray(ref_sub.X.todense())
+    sc.pp.normalize_total(ref_sub, target_sum=1e4)
+    sc.pp.log1p(ref_sub)
+    sc.pp.scale(ref_sub, max_value=10)
+    sc.pp.pca(ref_sub)
+
+    # Project target into reference PCA space
+    tgt_sub = adata[:, shared_genes].copy()
+    if 'raw' in tgt_sub.layers:
+        tgt_sub.X = tgt_sub.layers['raw'].copy()
+    if issparse(tgt_sub.X):
+        tgt_sub.X = np.asarray(tgt_sub.X.todense())
+    sc.pp.normalize_total(tgt_sub, target_sum=1e4)
+    sc.pp.log1p(tgt_sub)
+
+    tgt_X = np.array(tgt_sub.X)
+    ref_mean = ref_sub.var['mean'].values
+    ref_std = ref_sub.var['std'].values.copy()
+    ref_std[ref_std == 0] = 1.0
+    tgt_X = np.clip((tgt_X - ref_mean) / ref_std, -10, 10)
+    tgt_pca = tgt_X @ ref_sub.varm['PCs']
+
+    # kNN in aligned PCA space
+    print(f"    [Label Transfer] Running kNN (k={n_neighbors}) in PCA space...")
+    nn = NearestNeighbors(n_neighbors=n_neighbors, metric='euclidean')
+    nn.fit(ref_sub.obsm['X_pca'])
+    distances, indices = nn.kneighbors(tgt_pca)
+
+    ref_labels = ref_sub.obs[ref_celltype_key].values
+    cell_labels = []
+    confidence_scores = []
+    for idx_row in indices:
+        neighbour_labels = ref_labels[idx_row]
+        values, counts = np.unique(neighbour_labels, return_counts=True)
+        winner_idx = np.argmax(counts)
+        cell_labels.append(values[winner_idx])
+        confidence_scores.append(counts[winner_idx] / len(neighbour_labels))
+
+    adata.obs['celltype'] = cell_labels
+    adata.obs['celltype_confidence'] = confidence_scores
+
+    assigned_types = len(np.unique(cell_labels))
+    mean_conf = np.mean(confidence_scores)
+    print(f"    [Label Transfer] Done: {assigned_types} cell types, mean confidence {mean_conf:.2f}")
+    print(f"    [Label Transfer] Cell types: {sorted(pd.Series(cell_labels).unique())}")
+
+    del adata_ref, ref_sub, tgt_sub
+    return 'celltype'
 
 
 # --- Main entry point ---
@@ -385,6 +695,7 @@ def run_step5(config):
     dist_threshold = exp_config.get("distance_threshold", None)
     min_reads_per_domain = exp_config.get("min_reads_per_domain", 5000)
     diff_threshold = exp_config.get("diff_threshold", 0.1)
+    threshold_mode = exp_config.get("threshold_mode", "absolute")
 
     if not run_exp:
         print("    - [Info] 'run_expansion' is False in config. Skipping Step 5.")
@@ -433,6 +744,14 @@ def run_step5(config):
                         reads_original = pd.read_csv(candidate, low_memory=False)
                     break
 
+    # Decode bytes columns from parquet (Xenium parquet stores strings as bytes)
+    if reads_original is not None:
+        for col in reads_original.columns:
+            if (reads_original[col].dtype == object
+                    and len(reads_original) > 0
+                    and isinstance(reads_original[col].iloc[0], bytes)):
+                reads_original[col] = reads_original[col].str.decode('utf-8')
+
     if reads_original is None:
         logging.error(
             "    - Transcripts not found: uns['spots'], uns['spots_path'], "
@@ -469,25 +788,78 @@ def run_step5(config):
     adata_annotated = sc.read_h5ad(input_adata_file)
     print(f"    - Loaded annotated cells: {adata_annotated.shape}")
 
+    # --- Label Transfer: ensure cell-type annotation exists ---
+    celltype_check = ['Class', 'celltype', 'cell_type', 'celltype_majority', 'initial_annotation']
+    has_celltype = any(k in adata_annotated.obs.columns for k in celltype_check
+                       if k not in ['leiden', 'cluster', 'graph_clusters'])
+    if not has_celltype:
+        sc_ref_path = (config.get("comparison", {}).get("sc_reference_path")
+                       or config.get("benchmark", {}).get("reference_adata")
+                       or config.get("benchmark", {}).get("sc_reference_path"))
+        ref_ct_key = config.get("sc_reference", {}).get("celltype_key", "subclass_label")
+
+        if sc_ref_path and os.path.exists(str(sc_ref_path)):
+            ct_col = _transfer_celltype_labels(
+                adata_annotated, str(sc_ref_path), ref_celltype_key=ref_ct_key)
+            if ct_col:
+                # Save annotated adata back so downstream steps can reuse it
+                print(f"    - Saving annotated adata back to: {input_adata_file}")
+                adata_annotated.write_h5ad(input_adata_file)
+        else:
+            print("    - [WARNING] No cell-type annotation and no scRNA reference available.")
+            print("      Turnover analysis will use domain as cell-type proxy (may give trivial results).")
+
     # --- 5-3. Map domain assignments to reads ---
     print("\n[Step 5-2] Identifying Domains & Unassigned Reads...")
 
     # Domain key (spatial regions)
     domain_key = None
-    domain_priority = ['spatial_annotation', 'region_annotation', 'leiden', 'cluster', 'graph_clusters']
-    for key in domain_priority:
+
+    # Priority 1: True spatial annotations
+    for key in ['spatial_annotation', 'region_annotation']:
         if key in adata_annotated.obs.columns:
             domain_key = key
             break
 
+    # Priority 2: P2R spatial domains from Step 2
+    if domain_key is None:
+        p2r_domains = _load_p2r_spatial_domains(
+            adata_annotated, output_dir, sample_tag,
+            n_clusters=exp_config.get('p2r_n_clusters', 50),
+            max_dist_um=exp_config.get('p2r_max_dist_um', 100.0))
+        if p2r_domains is not None:
+            adata_annotated.obs['p2r_domain'] = p2r_domains
+            domain_key = 'p2r_domain'
+
+    # Priority 3: Expression-based fallbacks (less ideal but functional)
+    if domain_key is None:
+        for key in ['leiden', 'cluster', 'graph_clusters']:
+            if key in adata_annotated.obs.columns:
+                domain_key = key
+                break
+
+    # Priority 4: Run leiden as last resort
     if not domain_key:
-        logging.error("    - No suitable domain/cluster key found in annotated adata. Cannot assign domains.")
-        return
+        print("    - No domain/cluster key found. Running leiden clustering as fallback...")
+        try:
+            adata_tmp = adata_annotated.copy()
+            sc.pp.normalize_total(adata_tmp, target_sum=100)
+            sc.pp.log1p(adata_tmp)
+            sc.pp.pca(adata_tmp)
+            sc.pp.neighbors(adata_tmp, n_neighbors=15)
+            sc.tl.leiden(adata_tmp, resolution=1.0, key_added='leiden')
+            adata_annotated.obs['leiden'] = adata_tmp.obs['leiden']
+            domain_key = 'leiden'
+            print(f"    - Fallback leiden clustering complete: {adata_annotated.obs['leiden'].nunique()} clusters")
+            del adata_tmp
+        except Exception as e:
+            logging.error(f"    - Fallback leiden clustering failed: {e}")
+            return
     print(f"    - Using '{domain_key}' as domain source.")
 
     # Cell-type key (distinct from domain — used for per-celltype turnover)
     celltype_key = None
-    celltype_priority = ['Class', 'celltype', 'cell_type', 'initial_annotation', 'ct_majority']
+    celltype_priority = ['Class', 'celltype', 'cell_type', 'celltype_majority', 'initial_annotation', 'ct_majority']
     for key in celltype_priority:
         if key in adata_annotated.obs.columns:
             celltype_key = key
@@ -503,6 +875,7 @@ def run_step5(config):
         annotated_ids = adata_annotated.obs.index
 
     domain_map = dict(zip(annotated_ids, adata_annotated.obs[domain_key]))
+    ct_map = dict(zip(annotated_ids, adata_annotated.obs[celltype_key]))
 
     print("    - Mapping existing domains to reads...")
     if 'cell_id' not in reads_original.columns:
@@ -512,10 +885,48 @@ def run_step5(config):
             logging.error("    - 'cell_id' missing in reads. Cannot link to cells.")
             return
 
+    # --- Primary: cell_id-based mapping ---
     reads_original['domain'] = reads_original['cell_id'].map(domain_map)
-
-    ct_map = dict(zip(annotated_ids, adata_annotated.obs[celltype_key]))
     reads_original['initial_annotation'] = reads_original['cell_id'].map(ct_map)
+
+    # --- Fallback: bridge via Step 3 reseg transcripts if cell_id spaces don't match
+    #     (e.g. Cellpose mask labels vs original Xenium barcodes) ---
+    match_rate = reads_original['domain'].notna().mean()
+    if match_rate < 0.01:
+        print(f"    - [WARNING] Cell ID match rate {match_rate:.1%} — ID spaces differ.")
+        step_dir = os.path.dirname(input_adata_file) if input_adata_file else None
+        if step_dir:
+            step3_tx = os.path.join(
+                step_dir, f"{sample_tag}_step3_transcripts_resegmented.csv")
+            if os.path.exists(step3_tx):
+                print(f"    - Bridging via reseg transcripts: {step3_tx}")
+                df_bridge = pd.read_csv(step3_tx, low_memory=False)
+                reseg_col = next(
+                    (c for c in ['closest_cell', 'cell_id_reseg', 'in_cell']
+                     if c in df_bridge.columns), None)
+                if reseg_col and 'x_location' in df_bridge.columns:
+                    df_bridge['_dom'] = df_bridge[reseg_col].astype(str).map(domain_map)
+                    df_bridge['_ann'] = df_bridge[reseg_col].astype(str).map(ct_map)
+                    # Coordinate-based lookup (string key for fast matching)
+                    bkey = (df_bridge['x_location'].round(2).astype(str) + '_'
+                            + df_bridge['y_location'].round(2).astype(str))
+                    dom_lookup = dict(zip(bkey, df_bridge['_dom']))
+                    ann_lookup = dict(zip(bkey, df_bridge['_ann']))
+                    rkey = (reads_original['x_location'].round(2).astype(str) + '_'
+                            + reads_original['y_location'].round(2).astype(str))
+                    reads_original['domain'] = rkey.map(dom_lookup)
+                    reads_original['initial_annotation'] = rkey.map(ann_lookup)
+                    new_rate = reads_original['domain'].notna().mean()
+                    print(f"    - After bridging: {new_rate:.1%} reads matched to domains")
+                    del df_bridge
+
+        if reads_original['domain'].notna().mean() < 0.01:
+            logging.error(
+                "    - Domain mapping failed. Annotated cell IDs don't match "
+                "original transcript cell IDs, and no Step 3 transcripts CSV found. "
+                "Consider using Step 1 data instead of Step 3 for Step 5."
+            )
+            return
 
     nancells = reads_original[reads_original['domain'].isna()]
     annotatedcells = reads_original[~reads_original['domain'].isna()]
@@ -597,8 +1008,9 @@ def run_step5(config):
     print("\n[Step 5-6] Generating Visualization...")
     plot_df = reads_original.sample(n=min(len(reads_original), 100000), random_state=42)
 
-    plt.figure(figsize=(10, 10))
+    fig, ax = plt.subplots(figsize=(12, 10))
     plot_df_clean = plot_df.dropna(subset=['domain'])
+    n_domains = plot_df_clean['domain'].nunique()
     sns.scatterplot(
         data=plot_df_clean,
         x='x_location',
@@ -607,24 +1019,47 @@ def run_step5(config):
         s=1,
         linewidth=0,
         palette='tab20',
-        legend=False
+        legend='brief' if n_domains <= 25 else False,
+        ax=ax
     )
-    plt.title(f"Optimal Expansion Result (Subsample {subsample_frac})")
-    plt.axis('equal')
+    ax.set_title(f"Optimal Expansion Result (Subsample {subsample_frac})")
+    ax.set_aspect('equal')
+    if n_domains <= 25:
+        ax.legend(markerscale=5, fontsize=6, loc='center left', bbox_to_anchor=(1, 0.5),
+                  title='Domain', title_fontsize=7)
 
     plot_file = os.path.join(output_dir, f"{sample_tag}_step5_expansion_map.png")
-    plt.savefig(plot_file, dpi=300, bbox_inches='tight')
-    plt.close()
+    fig.savefig(plot_file, dpi=300, bbox_inches='tight')
+    plt.close(fig)
     print(f"    - Saved Expansion Map to: {plot_file}")
 
-    plt.figure(figsize=(6, 4))
-    sns.histplot(concat_distances, bins=50, kde=True, color='orange')
-    plt.title("Distance to Nearest Domain-Anchor")
-    plt.xlabel("Distance (pixels/units)")
-    plt.ylabel("Count")
+    # Xenium x_location/y_location are already in µm, so KDTree distances
+    # are natively in µm — no pixel conversion needed.
+    distances_um = concat_distances
+
+    fig_dist, ax_dist = plt.subplots(figsize=(6, 4))
+    counts, bin_edges, patches = ax_dist.hist(distances_um, bins=50, color='orange', alpha=0.7, edgecolor='white')
+    sns.kdeplot(distances_um, color='darkorange', linewidth=1.5, ax=ax_dist)
+
+    # Annotate peak bin
+    peak_idx = int(np.argmax(counts))
+    peak_count = int(counts[peak_idx])
+    peak_dist = (bin_edges[peak_idx] + bin_edges[peak_idx + 1]) / 2
+    ax_dist.annotate(
+        f'Peak: {peak_dist:.1f} µm, n={peak_count:,}',
+        xy=(peak_dist, peak_count),
+        xytext=(peak_dist + (distances_um.max() - distances_um.min()) * 0.15, peak_count * 0.9),
+        arrowprops=dict(arrowstyle='->', color='black', lw=1.2),
+        fontsize=9, fontweight='bold',
+        bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='gray', alpha=0.9)
+    )
+
+    ax_dist.set_title("Distance to Nearest Domain-Anchor")
+    ax_dist.set_xlabel("Distance (µm)")
+    ax_dist.set_ylabel("Count")
     dist_file = os.path.join(output_dir, f"{sample_tag}_step5_expansion_distances.png")
-    plt.savefig(dist_file)
-    plt.close()
+    fig_dist.savefig(dist_file, dpi=300, bbox_inches='tight')
+    plt.close(fig_dist)
     print(f"    - Saved Distance Histogram to: {dist_file}")
 
     # --- 5-7. Save expanded transcripts ---
@@ -650,22 +1085,54 @@ def run_step5(config):
     reads_not_assigned = reads_original[mask_not_assigned].copy()
     reads_assigned_all = reads_original[~mask_not_assigned].copy()
 
+    # Filter out negative control probes (NegControlProbe, NegControlCodeword, BLANK, antisense)
+    # These have no cell-type specificity and add noise to correlation-based turnover analysis.
+    if 'feature_name' in reads_not_assigned.columns:
+        _ctrl = reads_not_assigned['feature_name'].str.contains(
+            'BLANK|NegControl|antisense', case=False, na=False)
+        n_ctrl_bg = _ctrl.sum()
+        if n_ctrl_bg > 0:
+            reads_not_assigned = reads_not_assigned[~_ctrl]
+            print(f"    - Filtered {n_ctrl_bg} negative control transcripts from background reads")
+    if 'feature_name' in reads_assigned_all.columns:
+        _ctrl = reads_assigned_all['feature_name'].str.contains(
+            'BLANK|NegControl|antisense', case=False, na=False)
+        n_ctrl_fg = _ctrl.sum()
+        if n_ctrl_fg > 0:
+            reads_assigned_all = reads_assigned_all[~_ctrl]
+            print(f"    - Filtered {n_ctrl_fg} negative control transcripts from assigned reads")
+
     print(f"    - Reads assigned to cells:   {len(reads_assigned_all)}")
     print(f"    - Reads not assigned (background): {len(reads_not_assigned)}")
 
     # Compute distance from each assigned read to its cell centroid
+    # Try each centroid source and verify cell_id match rate before committing
+    cx_map, cy_map = None, None
+
+    # 1) Try annotated adata (e.g. Step 3) centroids
     if 'x_centroid' in adata_annotated.obs.columns and 'y_centroid' in adata_annotated.obs.columns:
-        cx_map = dict(zip(annotated_ids, adata_annotated.obs['x_centroid']))
-        cy_map = dict(zip(annotated_ids, adata_annotated.obs['y_centroid']))
-    elif 'x_centroid' in adata_step0.obs.columns and 'y_centroid' in adata_step0.obs.columns:
+        _cx = dict(zip(annotated_ids, adata_annotated.obs['x_centroid']))
+        _cy = dict(zip(annotated_ids, adata_annotated.obs['y_centroid']))
+        _match = reads_assigned_all['cell_id'].isin(_cx.keys()).mean()
+        if _match > 0.01:
+            cx_map, cy_map = _cx, _cy
+            print(f"    - Using annotated adata centroids (match rate={_match:.1%})")
+
+    # 2) Fall back to Step 0 centroids if annotated IDs don't match reads
+    if cx_map is None and 'x_centroid' in adata_step0.obs.columns and 'y_centroid' in adata_step0.obs.columns:
         if 'cell_id' in adata_step0.obs.columns:
-            cx_map = dict(zip(adata_step0.obs['cell_id'], adata_step0.obs['x_centroid']))
-            cy_map = dict(zip(adata_step0.obs['cell_id'], adata_step0.obs['y_centroid']))
+            _cx = dict(zip(adata_step0.obs['cell_id'], adata_step0.obs['x_centroid']))
+            _cy = dict(zip(adata_step0.obs['cell_id'], adata_step0.obs['y_centroid']))
         else:
-            cx_map = dict(zip(adata_step0.obs.index, adata_step0.obs['x_centroid']))
-            cy_map = dict(zip(adata_step0.obs.index, adata_step0.obs['y_centroid']))
-    else:
-        print("    - [Warning] Centroid data (x_centroid, y_centroid) missing. Skipping Turnover Analysis.")
+            _cx = dict(zip(adata_step0.obs.index, adata_step0.obs['x_centroid']))
+            _cy = dict(zip(adata_step0.obs.index, adata_step0.obs['y_centroid']))
+        _match = reads_assigned_all['cell_id'].isin(_cx.keys()).mean()
+        if _match > 0.01:
+            cx_map, cy_map = _cx, _cy
+            print(f"    - Using Step 0 centroids (match rate={_match:.1%})")
+
+    if cx_map is None:
+        print("    - [Warning] No centroids match read cell_ids. Skipping Turnover Analysis.")
         print("\n=== Step 5 Optimal Expansion Complete ===")
         return
 
@@ -690,7 +1157,8 @@ def run_step5(config):
         fig_qc, ax_qc = plt.subplots(figsize=(10, 10))
         sub_reads = reads_assigned_val.sample(n=min(len(reads_assigned_val), 100000), random_state=42)
         ax_qc.scatter(sub_reads['x_location'], sub_reads['y_location'], s=1, alpha=0.3, label='reads')
-        ax_qc.scatter(sub_reads['x_cell'].drop_duplicates(), sub_reads['y_cell'].drop_duplicates(),
+        centroid_df = sub_reads[['x_cell', 'y_cell']].drop_duplicates()
+        ax_qc.scatter(centroid_df['x_cell'], centroid_df['y_cell'],
                        s=0.5, color='red', alpha=0.5, label='centroids')
         ax_qc.set_title("Reads vs Cell Centroids")
         ax_qc.legend(markerscale=5)
@@ -725,15 +1193,25 @@ def run_step5(config):
                 celltype_colors = dict(zip(cats, colors[:len(cats)]))
                 print(f"    - Using custom '{color_key}' palette ({len(celltype_colors)} colors)")
 
-    turnover_summ, per_celltype, optimal_expansion = calculate_turnover(
-        reads_assigned=reads_assigned_val,
-        reads_not_assigned=reads_not_assigned,
-        output_dir=output_dir,
-        sample_tag=sample_tag,
-        min_reads_per_domain=min_reads_per_domain,
-        diff_threshold=diff_threshold,
-        celltype_colors=celltype_colors
-    )
+    turnover_csv = os.path.join(output_dir, f"{sample_tag}_step5_turnover_per_celltype.csv")
+    turnover_summ_csv = os.path.join(output_dir, f"{sample_tag}_step5_turnover_summary.csv")
+
+    if os.path.exists(turnover_csv) and os.path.exists(turnover_summ_csv):
+        print(f"\n    [CACHE HIT] Turnover results found. Skipping recomputation.")
+        print(f"      - {turnover_csv}")
+        print(f"      - {turnover_summ_csv}")
+        per_celltype = pd.read_csv(turnover_csv)
+    else:
+        turnover_summ, per_celltype, optimal_expansion = calculate_turnover(
+            reads_assigned=reads_assigned_val,
+            reads_not_assigned=reads_not_assigned,
+            output_dir=output_dir,
+            sample_tag=sample_tag,
+            min_reads_per_domain=min_reads_per_domain,
+            diff_threshold=diff_threshold,
+            celltype_colors=celltype_colors,
+            threshold_mode=threshold_mode
+        )
 
     if per_celltype is not None:
         print(f"\n    Turnover per-celltype summary:")

@@ -145,10 +145,10 @@ def negative_marker_purity_cells(adata_sp: AnnData, adata_sc: AnnData, key: str=
     
     # Filter cell types by minimum number of cells
     celltype_count_sc = adata_sc.obs[key].value_counts().loc[shared_celltypes]
-    celltype_count_sp = adata_sc.obs[key].value_counts().loc[shared_celltypes]
+    celltype_count_sp = adata_sp.obs[key].value_counts().loc[shared_celltypes]  # BUG FIX: was adata_sc
     ct_filter = (celltype_count_sc >= min_number_cells) & (celltype_count_sp >= min_number_cells)
     celltypes = celltype_count_sc.loc[ct_filter].index.tolist()
-    
+
     # Return nan if too few cell types were found
     if len(celltypes) < 2:
         print("Not enough cell types (>1) eligible to calculate negative marker purity")
@@ -157,11 +157,11 @@ def negative_marker_purity_cells(adata_sp: AnnData, adata_sc: AnnData, key: str=
             return negative_marker_purity
         else:
             return negative_marker_purity, None, None
-    
+
     # Filter cells to eligible cell types
     adata_sc = adata_sc[adata_sc.obs[key].isin(celltypes)]
     adata_sp = adata_sp[adata_sp.obs[key].isin(celltypes)]
-    
+
     # besides the threshold parameter till here neg. marker purity reads and cells are the same
     
     
@@ -250,10 +250,10 @@ def negative_marker_purity_reads(adata_sp: AnnData, adata_sc: AnnData, key: str=
     
     # Filter cell types by minimum number of cells
     celltype_count_sc = adata_sc.obs[key].value_counts().loc[shared_celltypes]
-    celltype_count_sp = adata_sc.obs[key].value_counts().loc[shared_celltypes]
+    celltype_count_sp = adata_sp.obs[key].value_counts().loc[shared_celltypes]  # BUG FIX: was adata_sc
     ct_filter = (celltype_count_sc >= min_number_cells) & (celltype_count_sp >= min_number_cells)
     celltypes = celltype_count_sc.loc[ct_filter].index.tolist()
-    
+
     # Return nan if too few cell types were found
     if len(celltypes) < 2:
         print("Not enough cell types (>1) eligible to calculate negative marker purity")
@@ -262,11 +262,11 @@ def negative_marker_purity_reads(adata_sp: AnnData, adata_sc: AnnData, key: str=
             return negative_marker_purity
         else:
             return negative_marker_purity, None, None
-    
+
     # Filter cells to eligible cell types
     adata_sc = adata_sc[adata_sc.obs[key].isin(celltypes)]
     adata_sp = adata_sp[adata_sp.obs[key].isin(celltypes)]
-    
+
     # Get mean expression per cell type
     exp_sc = pd.DataFrame(adata_sc.layers['raw'],columns=adata_sp.var_names)
     exp_sp = pd.DataFrame(adata_sp.layers['raw'],columns=adata_sp.var_names)

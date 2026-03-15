@@ -14,12 +14,22 @@ sample_tag: "human_alzheimers"
 baysor:
   enabled: true
   dry_run: false  # Set true to simulate Baysor execution (no actual run)
-  executable_path: "/usr/local/bin/baysor" # Path to baysor binary; on server: adjust to actual installation path
+  executable_path: "/data/project/lyrak/Anaconda3/envs/masld/bin/baysor" # Path to baysor binary
   params:
-    scale: 50
+    scale: 15
     min_molecules_per_cell: 10
     prior_segmentation_confidence: 0.8 # User requested value
     save_polygons: true
+  crop:
+    enabled: true           # crop mode: run Baysor on densest region only (~5-10h vs 3d+)
+    size_um: 2000           # 2000x2000 µm square
+    coords: null            # null = auto-detect densest region, or [x_min, x_max, y_min, y_max]
+    subset_other_methods: true  # subset nuclei/cellpose/expansion to same crop region for fair comparison
+  tiling:
+    enabled: false          # tiling mode: tile entire tissue and run in parallel (future use)
+    tile_size_um: 2000
+    overlap_um: 200
+    n_workers: 4
 
 # Step 0: Formatting Parameters
 formatting:
@@ -32,21 +42,35 @@ exploration:
   # Ref: 1_7 uses radius=100 for structure scores
   neighbor_radius: 100.0
   run_transcript_dispersion: true
+  marker_qc:
+    enabled: false  # Strategy A default: keep Step1 as technical dispersion QC
+    marker_file: "data/markers/brain_localization_markers.tsv"
+    min_genes_per_class: 5
+    min_transcripts_per_gene: 30
+    thresholds_um:
+      nuclear_max: 5.0
+      cyto_max: 10.0
+    pass_rules:
+      nuclear_in_5um_min: 0.70
+      cyto_in_5_10um_min: 0.45
+      tail_gt10um_max: 0.20
+    allowed_classes: ["nuclear", "cytoplasmic", "mitochondrial", "secreted"]
+    qc_classes: ["nuclear", "cytoplasmic"]
   resolutions: [0.5, 0.8, 1.0, 1.5]
   primary_resolution: 1.0
 
 # Step 2 (New): Segmentation Free Analysis (Ref: Points2Regions etc.)
 segmentation_free:
   run_points2regions: true
-  run_ssam: false
-  run_overlaps: false  # Changed default: ovrlpy not fully implemented
-  distance_metric: "centroid"  # "centroid" (notebook default), "boundary", or "both"
+  run_ssam: true        # Requires: pip install ssam
+  run_overlaps: true    # Requires: pip install ovrlpy (+ z_location in transcripts)
+  distance_metric: "both"  # "centroid", "boundary", or "both" (paper uses both)
   
   points2regions:
     sigma: 3.0
     n_clusters: [50, 100, 200, 500]
     bin_width: 1.0
-    min_genes_per_bin: 15
+    min_genes_per_bin: 0    # Paper Methods: τ=0 (notebook used 15)
     
   ssam:
     ssam_vf_um_per_px: 2.0
@@ -79,7 +103,8 @@ comparison:
   positivity:
     n_neighbors: 8        # Notebook default: 8
     n_pcs: 0              # Notebook default: 0 (no PCA, use expression directly)
-    leiden_resolution: 2.2 # Notebook default: 2.2
+    leiden_resolution: 2.2 # Notebook default: 2.2 (primary, used for violin/UMAP)
+    leiden_resolutions: [2.2, 1.4, 0.6]  # Notebook 3_5: three resolutions
     umap_min_dist: 0.1    # Notebook default: 0.1
     min_counts: 10        # Cell filtering: min transcripts per cell
     min_genes: 3          # Cell filtering: min genes per cell
@@ -106,7 +131,7 @@ resegmentation:
   # Domain Assignment Params (from Notebook 3.2 logic if implemented)
   domain_assignment:
     n_domains: 5
-    domain_map_path: "figures/2.comparison_between_datasets/polygons/regions_multisection_1.json" # Path to domain polygons (JSON)
+    domain_map_path: null  # No domain polygon file; skipping domain assignment
 
 # Step 5: Optimal Expansion
 optimal_expansion:
@@ -115,18 +140,21 @@ optimal_expansion:
   distance_threshold: null  # Optional max distance (null = assigning to nearest regardless of dist)
   min_reads_per_domain: 5000  # Min transcripts per domain to include in turnover analysis
   diff_threshold: 0.1  # Correlation diff threshold to detect turnover point
+  p2r_n_clusters: 8        # Meta-cluster P2R k=50 bins into 8 spatial domains (fewer → larger domains → better turnover detection)
+  p2r_max_dist_um: 500.0   # Max distance (µm) for cell-to-bin mapping (~89% coverage with 1030 P2R bins)
+  threshold_mode: "absolute"  # Turnover detection: "absolute" (notebook: diff < 0.1), "crossover" (paper: diff < 0), "relative" (diff < diff_threshold * peak_diff)
 
-# Step 6: Benchmark Preprocessing (matches notebook defaults)
+# Step 6: Benchmark Preprocessing (matches paper best-practice: scale=true, n_neighbors=16)
 benchmark:
   preprocessing:
     target_sum: 100
     min_counts: 40
     min_genes: 15
-    n_neighbors: 15
-    n_pcs: 0  # 0 = use all PCs
+    n_neighbors: 16  # Paper best-practice: 16 (was 15)
+    n_pcs: 0  # 0 = use all PCs (paper: all principal components)
     umap_min_dist: 0.1
     resolution: 1.0
-    scale: false
+    scale: true  # Paper best-practice: scaling enabled (was false)
     hvg: true  # HVG selection before PCA (notebook default: true, params: min_mean=0.3, max_mean=7, min_disp=-0.5)
   reference_adata: null  # Path to reference .h5ad for annotation transfer
   ref_celltype_key: "celltype"  # Column in reference adata for cell type labels
@@ -152,6 +180,13 @@ simulation:
   # Assessment Parameters
   n_permutations: 30 # Number of preprocessing combinations to test
   reference_key: "cell_type" # Column in scRNAseq to use as ground truth
+
+  # Real data validation (Step 7-5): apply best params to actual Xenium data
+  real_validation:
+    enabled: true
+    run_single_param_variants: true
+    cleanup_intermediates: true    # delete simulated h5ad after benchmarking
+    cleanup_reference: false       # keep census reference by default
 
   # Preprocessing Grid (expanded to ~50 combinations)
   preprocessing_grid:

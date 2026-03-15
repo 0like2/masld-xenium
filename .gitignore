@@ -40,3 +40,7 @@ results/
 
 # Docker env
 docker/.env
+
+# Reference papers & large docs
+*.pdf
+SSAM_example_*.html

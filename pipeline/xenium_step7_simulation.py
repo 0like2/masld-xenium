@@ -17,6 +17,7 @@
 #   7-4. Perturbation analysis (single-param sensitivity)
 
 import os
+import json
 import logging
 import itertools
 import pandas as pd
@@ -49,6 +50,16 @@ logger = logging.getLogger(__name__)
 warnings.filterwarnings('ignore')
 
 MAX_GRID_COMBINATIONS = 50
+
+# Paper/notebook default preprocessing params (confirmed as best by simulation)
+DEFAULT_PARAMS = {
+    'normalize': True, 'target_sum': 100, 'log1p': True,
+    'scale': True, 'hvg': False, 'n_neighbors': 16,
+    'n_pcs': 0, 'resolution': 1.0,
+}
+
+# Paper's simulation confirmed these as optimal
+PAPER_BEST_PARAMS = dict(DEFAULT_PARAMS)
 
 
 # --- 7-2. Simulation helpers (inlined from xb/simulating.py) ---
@@ -214,8 +225,12 @@ def _params_to_run_name(params):
     )
 
 
-def _apply_preprocessing(adata, params):
-    """Apply one preprocessing workflow + Leiden clustering. Returns modified copy."""
+def _apply_preprocessing(adata, params, compute_umap=False):
+    """Apply one preprocessing workflow + Leiden clustering. Returns modified copy.
+
+    When n_pcs=0, PCA is still computed (matching notebook behaviour) and all
+    principal components are passed to ``sc.pp.neighbors`` via ``n_pcs=None``.
+    """
     ad = adata.copy()
 
     if hasattr(ad.X, "toarray"):
@@ -237,19 +252,21 @@ def _apply_preprocessing(adata, params):
 
     n_pcs = params['n_pcs']
 
-    if n_pcs > 0:
-        n_comps = min(n_pcs, ad.n_vars - 1, ad.n_obs - 1)
-        if n_comps < 2:
-            n_pcs = 0
-        else:
-            sc.pp.pca(ad, n_comps=n_comps)
-
-    if n_pcs > 0:
-        sc.pp.neighbors(ad, n_neighbors=params['n_neighbors'], n_pcs=n_pcs)
+    # Always run PCA when there are enough features
+    n_comps = min(max(n_pcs, 50), ad.n_vars - 1, ad.n_obs - 1)
+    if n_comps >= 2:
+        sc.pp.pca(ad, n_comps=n_comps)
+        # n_pcs=0 means "use all PCs" (pass None to neighbors)
+        neighbor_pcs = n_pcs if n_pcs > 0 else None
+        sc.pp.neighbors(ad, n_neighbors=params['n_neighbors'], n_pcs=neighbor_pcs)
     else:
         sc.pp.neighbors(ad, n_neighbors=params['n_neighbors'], use_rep='X')
 
     sc.tl.leiden(ad, resolution=params['resolution'], key_added='leiden')
+
+    if compute_umap:
+        sc.tl.umap(ad)
+
     return ad
 
 
@@ -474,14 +491,19 @@ def run_step7_3_benchmarking(config, sim_file):
         'normalize', 'target_sum', 'log1p', 'scale', 'hvg',
         'n_neighbors', 'n_pcs', 'resolution',
     ]}
+    # Convert numpy types to native Python for JSON serialization
+    best_params = {k: v.item() if hasattr(v, 'item') else v for k, v in best_params.items()}
     print(f"    - Best ARI = {best_row['ARI']:.4f} | {best_row['Run']}")
+
+    # Save best params
+    _save_best_params(bench_df, output_dir, sample_tag)
 
     # --- 7-3d. Benchmark plots ---
     _generate_benchmark_plots(bench_df, output_dir, sample_tag)
 
     run_perturbation_analysis(config, sim_file, best_params, gt_labels, adata, output_dir, sample_tag)
 
-    return bench_df
+    return bench_df, best_params
 
 
 # --- 7-3d. Benchmark visualization helpers ---
@@ -665,33 +687,326 @@ def run_perturbation_analysis(config, sim_file, best_params, gt_labels, adata, o
         logger.warning(f"Could not generate perturbation plot: {e}")
 
 
+# --- 7-5. Best params persistence & real data validation ---
+
+def _save_best_params(bench_df, output_dir, sample_tag):
+    """Extract best-ARI row from benchmark results and save as JSON."""
+    best_row = bench_df.loc[bench_df['ARI'].idxmax()]
+    param_keys = ['normalize', 'target_sum', 'log1p', 'scale', 'hvg',
+                  'n_neighbors', 'n_pcs', 'resolution']
+    best = {}
+    for k in param_keys:
+        v = best_row[k]
+        best[k] = v.item() if hasattr(v, 'item') else v
+    best['best_ari'] = float(best_row['ARI'])
+
+    out_path = os.path.join(output_dir, f"{sample_tag}_step7_best_params.json")
+    with open(out_path, 'w') as f:
+        json.dump(best, f, indent=2)
+    print(f"    - Saved best params: {out_path}")
+    return best
+
+
+def _load_best_params(output_dir, sample_tag):
+    """Load best params JSON; fall back to PAPER_BEST_PARAMS."""
+    path = os.path.join(output_dir, f"{sample_tag}_step7_best_params.json")
+    if os.path.exists(path):
+        with open(path, 'r') as f:
+            params = json.load(f)
+        # Remove metadata keys
+        params.pop('best_ari', None)
+        logger.info(f"Loaded best params from {path}")
+        return params
+    logger.info("No best params JSON found — using PAPER_BEST_PARAMS")
+    return dict(PAPER_BEST_PARAMS)
+
+
+def _run_single_param_variants(adata, default_labels):
+    """Vary one param at a time from DEFAULT_PARAMS (notebook 1_6 nv==1 logic).
+
+    Returns DataFrame with columns: variant, param, value, ARI, NMI, FMI, VI.
+    """
+    variant_grid = {
+        'n_neighbors': [6, 12, 20],
+        'n_pcs':       [15, 25],
+        'target_sum':  [10, 1000, None],
+        'scale':       [False],
+        'hvg':         [True],
+        'normalize':   [False],
+        'log1p':       [False],
+    }
+
+    results = []
+    for param_name, values in variant_grid.items():
+        for val in values:
+            # Skip if same as default
+            if val == DEFAULT_PARAMS.get(param_name):
+                continue
+            test_params = dict(DEFAULT_PARAMS)
+            test_params[param_name] = val
+            # normalize=False ⇒ target_sum irrelevant
+            if not test_params['normalize']:
+                test_params['target_sum'] = 100  # placeholder
+
+            label = f"{param_name}={val}"
+            try:
+                ad = _apply_preprocessing(adata, test_params)
+                pred = ad.obs['leiden'].astype(str)
+                ari = adjusted_rand_score(default_labels, pred)
+                nmi = compute_nmi(default_labels, pred)
+                fmi = compute_fmi(default_labels, pred)
+                vi = compute_vi(default_labels, pred)
+            except Exception as e:
+                logger.warning(f"Variant {label} failed: {e}")
+                ari = nmi = fmi = vi = np.nan
+
+            results.append({
+                'variant': label,
+                'param': param_name,
+                'value': val if val is not None else 'None',
+                'ARI': ari, 'NMI': nmi, 'FMI': fmi, 'VI': vi,
+            })
+
+    return pd.DataFrame(results)
+
+
+def _generate_real_validation_plots(ad_default, ad_optimized, metrics,
+                                     variant_df, best_params,
+                                     output_dir, sample_tag):
+    """Generate 5 real-validation plots."""
+
+    # 1. UMAP comparison: default vs optimized
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    sc.pl.umap(ad_default, color='leiden', ax=axes[0], show=False, title='Default params')
+    sc.pl.umap(ad_optimized, color='leiden', ax=axes[1], show=False, title='Optimized params')
+    plt.tight_layout()
+    fig.savefig(os.path.join(output_dir, f"{sample_tag}_step7_real_umap_comparison.png"), dpi=150)
+    plt.close(fig)
+
+    # 2. Grouped bar: ARI/NMI/FMI comparison
+    metric_names = ['ARI', 'NMI', 'FMI']
+    metric_vals = [metrics.get(m, 0) for m in metric_names]
+    fig, ax = plt.subplots(figsize=(6, 5))
+    ax.bar(metric_names, metric_vals, color=['steelblue', 'coral', 'seagreen'])
+    ax.set_ylabel('Score')
+    ax.set_title('Default vs Optimized Clustering Agreement')
+    ax.set_ylim(0, 1.05)
+    for i, v in enumerate(metric_vals):
+        ax.text(i, v + 0.02, f'{v:.3f}', ha='center', fontsize=10)
+    plt.tight_layout()
+    fig.savefig(os.path.join(output_dir, f"{sample_tag}_step7_real_default_vs_optimized.png"), dpi=150)
+    plt.close(fig)
+
+    # 3. Single-param variant ARI barplot (Fig 4e equivalent)
+    if variant_df is not None and len(variant_df) > 0:
+        fig, ax = plt.subplots(figsize=(8, max(4, len(variant_df) * 0.4)))
+        variant_sorted = variant_df.sort_values('ARI', ascending=True)
+        ax.barh(variant_sorted['variant'], variant_sorted['ARI'], color='steelblue')
+        ax.set_xlabel('ARI vs Default')
+        ax.set_title('Single-Parameter Variant Impact (Fig 4e)')
+        plt.tight_layout()
+        fig.savefig(os.path.join(output_dir, f"{sample_tag}_step7_real_variant_ari.png"), dpi=150)
+        plt.close(fig)
+
+        # 4. Variant metrics heatmap
+        try:
+            heat_data = variant_sorted.set_index('variant')[['ARI', 'NMI', 'FMI', 'VI']]
+            fig, ax = plt.subplots(figsize=(6, max(4, len(variant_df) * 0.35)))
+            sns.heatmap(heat_data, annot=True, fmt='.3f', cmap='YlOrRd', ax=ax)
+            ax.set_title('Variant Metrics Heatmap')
+            plt.tight_layout()
+            fig.savefig(os.path.join(output_dir, f"{sample_tag}_step7_real_variant_metrics_heatmap.png"), dpi=150)
+            plt.close(fig)
+        except Exception as e:
+            logger.warning(f"Could not generate variant heatmap: {e}")
+
+    # 5. Param diff table
+    try:
+        rows = []
+        for k in DEFAULT_PARAMS:
+            rows.append({
+                'Parameter': k,
+                'Default': str(DEFAULT_PARAMS[k]),
+                'Best': str(best_params.get(k, DEFAULT_PARAMS[k])),
+            })
+        diff_df = pd.DataFrame(rows)
+        diff_df['Changed'] = diff_df['Default'] != diff_df['Best']
+
+        fig, ax = plt.subplots(figsize=(8, 3))
+        ax.axis('off')
+        table = ax.table(cellText=diff_df.values, colLabels=diff_df.columns,
+                         loc='center', cellLoc='center')
+        table.auto_set_font_size(False)
+        table.set_fontsize(9)
+        table.scale(1.2, 1.4)
+        # Highlight changed rows
+        for i, changed in enumerate(diff_df['Changed']):
+            if changed:
+                for j in range(len(diff_df.columns)):
+                    table[i + 1, j].set_facecolor('#FFFFCC')
+        ax.set_title('Default vs Best Parameters', fontsize=12, pad=20)
+        plt.tight_layout()
+        fig.savefig(os.path.join(output_dir, f"{sample_tag}_step7_real_param_diff.png"), dpi=150, bbox_inches='tight')
+        plt.close(fig)
+    except Exception as e:
+        logger.warning(f"Could not generate param diff table: {e}")
+
+    print(f"    - Saved real validation plots to {output_dir}")
+
+
+def run_step7_5_real_validation(config, real_adata_path, best_params):
+    """Apply best preprocessing params to real Xenium data (Paper Fig 4e).
+
+    1. Load real adata (Step 0 raw counts)
+    2. Apply DEFAULT_PARAMS → ad_default (with UMAP)
+    3. Apply best_params → ad_optimized (with UMAP)
+    4. Compute ARI/NMI/FMI/VI between default vs optimized clustering
+    5. Run single-param variants (if config enabled)
+    6. Generate plots
+    7. Save optimized adata with layers['raw'] preserved
+    8. Save variant metrics CSV
+    9. Return optimized adata path
+    """
+    print("\n[Step 7-5] Real Data Validation (Ref: Notebook 1_6)...")
+
+    output_dir = config["output_dir"]
+    sample_tag = config.get("sample_tag", "sample")
+    sim_config = config.get("simulation", {})
+    rv_config = sim_config.get("real_validation", {})
+
+    if not rv_config.get("enabled", True):
+        print("    - Skipping 7-5 (real_validation.enabled=false)")
+        return None
+
+    if not real_adata_path or not os.path.exists(real_adata_path):
+        print(f"    - Error: Real adata not found at {real_adata_path}")
+        return None
+
+    # Load real data
+    print(f"    - Loading real data: {real_adata_path}")
+    adata = sc.read_h5ad(real_adata_path)
+    print(f"    - Real data: {adata.n_obs} cells, {adata.n_vars} genes")
+
+    # Preserve raw counts
+    if 'raw' not in adata.layers:
+        if hasattr(adata.X, 'toarray'):
+            adata.layers['raw'] = adata.X.toarray().copy()
+        else:
+            adata.layers['raw'] = adata.X.copy()
+
+    # Apply DEFAULT preprocessing
+    print("    - Applying DEFAULT preprocessing...")
+    ad_default = _apply_preprocessing(adata, DEFAULT_PARAMS, compute_umap=True)
+    default_labels = ad_default.obs['leiden'].astype(str)
+
+    # Apply BEST preprocessing
+    print(f"    - Applying BEST preprocessing: {best_params}")
+    ad_optimized = _apply_preprocessing(adata, best_params, compute_umap=True)
+    optimized_labels = ad_optimized.obs['leiden'].astype(str)
+
+    # Compute agreement metrics (default vs optimized)
+    metrics = {
+        'ARI': adjusted_rand_score(default_labels, optimized_labels),
+        'NMI': compute_nmi(default_labels, optimized_labels),
+        'FMI': compute_fmi(default_labels, optimized_labels),
+        'VI':  compute_vi(default_labels, optimized_labels),
+    }
+    print(f"    - Default vs Optimized: ARI={metrics['ARI']:.4f}, NMI={metrics['NMI']:.4f}")
+
+    # Single-param variants
+    variant_df = None
+    if rv_config.get("run_single_param_variants", True):
+        print("    - Running single-param variants...")
+        variant_df = _run_single_param_variants(adata, default_labels)
+        variant_csv = os.path.join(output_dir, f"{sample_tag}_step7_real_variants.csv")
+        variant_df.to_csv(variant_csv, index=False)
+        print(f"    - Saved variant metrics: {variant_csv}")
+
+    # Generate plots
+    _generate_real_validation_plots(
+        ad_default, ad_optimized, metrics, variant_df,
+        best_params, output_dir, sample_tag,
+    )
+
+    # Save optimized adata (preserve raw layer)
+    ad_optimized.layers['raw'] = adata.layers['raw']
+    opt_path = os.path.join(output_dir, f"{sample_tag}_step7_optimized.h5ad")
+    ad_optimized.write_h5ad(opt_path)
+    print(f"    - Saved optimized adata: {opt_path}")
+
+    # Save metrics summary
+    metrics_file = os.path.join(output_dir, f"{sample_tag}_step7_real_metrics.json")
+    with open(metrics_file, 'w') as f:
+        json.dump(metrics, f, indent=2)
+
+    return opt_path
+
+
+def _cleanup_simulation_files(config, sim_files, ref_file):
+    """Delete simulated h5ad files after benchmarking to save disk space."""
+    sim_config = config.get("simulation", {})
+    rv_config = sim_config.get("real_validation", {})
+
+    if rv_config.get("cleanup_intermediates", True):
+        for f in sim_files:
+            if os.path.exists(f):
+                os.remove(f)
+                print(f"    - Cleaned up: {f}")
+
+    if rv_config.get("cleanup_reference", False):
+        if ref_file and os.path.exists(ref_file):
+            os.remove(ref_file)
+            print(f"    - Cleaned up reference: {ref_file}")
+
+
 # --- Main Orchestrator ---
 
-def run_step7(config):
+def run_step7(config, real_adata_path=None):
     print("\n" + "="*60)
     print("[Step 7] Simulation & Benchmarking (Notebooks 6_1 - 6_4)")
     print("="*60)
 
+    output_dir = config["output_dir"]
+    sample_tag = config.get("sample_tag", "sample")
     sim_config = config.get("simulation", {})
-    if not sim_config.get("run_simulation", False):
-        print("    - Skipping Step 7 (run_simulation=False)")
-        return
 
-    ref_file = run_step7_1_acquisition(config)
-    if not ref_file:
-         print("    - Step 7-1 Failed. Stopping.")
-         return
+    best_params = None
+    sim_files = []
+    ref_file = None
 
-    sim_files = run_step7_2_simulation(config, ref_file)
-    if not sim_files:
-         print("    - Step 7-2 Failed. Stopping.")
-         return
+    if sim_config.get("run_simulation", False):
+        ref_file = run_step7_1_acquisition(config)
+        if not ref_file:
+            print("    - Step 7-1 Failed. Stopping simulation.")
+        else:
+            sim_files = run_step7_2_simulation(config, ref_file)
+            if sim_files:
+                # Benchmark the standard simulation (first file)
+                result = run_step7_3_benchmarking(config, sim_files[0])
+                if result is not None:
+                    _bench_df, best_params = result
+            else:
+                print("    - Step 7-2 Failed. Stopping simulation.")
+    else:
+        print("    - Skipping simulation (run_simulation=False)")
 
-    # Benchmark the standard simulation (first file)
-    standard_sim = sim_files[0]
-    run_step7_3_benchmarking(config, standard_sim)
+    # Fallback to paper best params if simulation didn't run or failed
+    if best_params is None:
+        best_params = _load_best_params(output_dir, sample_tag)
+
+    # 7-5: Real data validation
+    optimized_adata_path = None
+    if real_adata_path:
+        optimized_adata_path = run_step7_5_real_validation(
+            config, real_adata_path, best_params,
+        )
+
+    # Cleanup simulation intermediates
+    if sim_files:
+        _cleanup_simulation_files(config, sim_files, ref_file)
 
     print("\n=== Step 7 Complete ===")
+    return optimized_adata_path
 
 if __name__ == "__main__":
     import yaml
