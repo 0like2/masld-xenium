@@ -1,6 +1,0 @@
-n_cells: 44943
-n_genes: 541
-median_genes_per_cell: 28.0
-median_counts_per_cell: 216.0
-total_counts: 10546674
-median_cell_area: 508.86578125

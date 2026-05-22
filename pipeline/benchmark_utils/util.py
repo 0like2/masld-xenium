@@ -173,7 +173,6 @@ def calculate_alpha_area(
     """    
 
     import alphashape
-    from descartes import PolygonPatch
     import shapely
     import json
     

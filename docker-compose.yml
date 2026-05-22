@@ -1,0 +1,20 @@
+services:
+  xenium-pipeline:
+    build: .
+    image: masld-xenium:latest
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - INPUT_PATH=/data/input
+      - OUTPUT_DIR=/data/output
+      - SAMPLE_TAG=${SAMPLE_TAG:-human_alzheimers}
+      - RUN_MODE=${RUN_MODE:-run}
+    volumes:
+      - ${HOST_DATA_DIR:?Set HOST_DATA_DIR}:/data/input:ro
+      - ${HOST_OUTPUT_DIR:?Set HOST_OUTPUT_DIR}:/data/output
+    shm_size: '8g'

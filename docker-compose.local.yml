@@ -1,0 +1,25 @@
+# ============================================================
+# Local (Mac / CPU) override — no GPU reservation
+# ============================================================
+# Usage:
+#   HOST_DATA_DIR=/path/to/data HOST_OUTPUT_DIR=/tmp/output \
+#     docker compose -f docker-compose.yml -f docker-compose.local.yml up
+# ============================================================
+
+services:
+  xenium-pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    image: masld-xenium:local
+    # Override: remove GPU reservation (deploy key is ignored)
+    deploy: {}
+    environment:
+      - INPUT_PATH=/data/input
+      - OUTPUT_DIR=/data/output
+      - SAMPLE_TAG=${SAMPLE_TAG:-human_alzheimers}
+      - RUN_MODE=${RUN_MODE:-run}
+    volumes:
+      - ${HOST_DATA_DIR:?Set HOST_DATA_DIR}:/data/input:ro
+      - ${HOST_OUTPUT_DIR:?Set HOST_OUTPUT_DIR}:/data/output
+    shm_size: '4g'

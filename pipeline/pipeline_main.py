@@ -5,8 +5,10 @@
 
 import os
 import sys
+import argparse
 import yaml
 import logging
+import time
 from pathlib import Path
 
 # Add current directory to path to allow imports if run from root
@@ -20,11 +22,34 @@ import xenium_step2_segmentation_free_analysis as step2
 import xenium_step3_resegmentation as step3
 import xenium_step4_techniques_comparison as step4
 import xenium_step5_optimal_expansion as step5
+import xenium_step6_segmentation_benchmark as step6
 import xenium_step7_simulation as step7
 
-# Configure Logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configure Logging — console + file
+LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logger = logging.getLogger(__name__)
+
+
+def setup_file_logging(log_dir):
+    """
+    Adds a FileHandler to the root logger so every module's log
+    (step0 ~ step7) is captured to a single timestamped log file.
+    Returns the path to the created log file.
+    """
+    os.makedirs(log_dir, exist_ok=True)
+    timestamp = time.strftime('%Y%m%d_%H%M%S')
+    log_path = os.path.join(log_dir, f"pipeline_run_{timestamp}.log")
+
+    file_handler = logging.FileHandler(log_path, encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)  # capture everything to file
+    file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+
+    # Attach to root logger so all child loggers (step modules) inherit it
+    logging.getLogger().addHandler(file_handler)
+
+    logger.info(f"Log file: {log_path}")
+    return log_path
 
 def load_config(path):
     with open(path, 'r') as f:
@@ -43,31 +68,41 @@ def main():
 
 
     # --- 1. Load Config ---
-    config_path = os.path.join(current_dir, "config.yaml")
+    parser = argparse.ArgumentParser(description="MASLD Xenium Pipeline")
+    parser.add_argument("--config", default=os.path.join(current_dir, "config.yaml"),
+                        help="Path to config YAML file")
+    args = parser.parse_args()
+    config_path = args.config
     if not os.path.exists(config_path):
         logger.error(f"Config file not found at {config_path}")
         return
 
     config = load_config(config_path)
     print(f"Loaded configuration from {config_path}")
-    
+
     # --- 1.1 Determine Output Structure ---
     # Input Path: .../data/SampleName_outs
     # Output Structure: xenium-output/SampleName_outs/stepX_name
     input_path = config["input_path"]
-    
+
     # Attempt to extract a meaningful sample name from the input path
     # If input path ends with '/', strip it first
     input_path_clean = input_path.rstrip(os.sep)
     sample_name = os.path.basename(input_path_clean)
-    
+
     # Base output directory
     base_output_root = config.get("output_dir", "xenium-output") # Default if not set
     sample_output_dir = os.path.join(base_output_root, sample_name)
-    
+
     print(f"Sample Name Derived: {sample_name}")
     print(f"Sample Output Directory: {sample_output_dir}")
     os.makedirs(sample_output_dir, exist_ok=True)
+
+    # --- 1.2 Set up file logging ---
+    log_dir = os.path.join(sample_output_dir, "logs")
+    log_path = setup_file_logging(log_dir)
+    logger.info(f"Pipeline started | sample={sample_name} | config={config_path}")
+    logger.info(f"All logs will be saved to: {log_path}")
     
     # Need to keep strict track of where data is for subsequent steps
     # We will update these as we go
@@ -103,11 +138,17 @@ def main():
             
     step0_adata_path = step0_output_file
     
-    # Search for transcripts.csv
+    # Search for transcripts.csv (or .parquet if configured)
     if os.path.exists(os.path.join(input_path, "transcripts.csv")):
         transcripts_csv_path = os.path.join(input_path, "transcripts.csv")
     elif os.path.exists(os.path.join(step0_dir, "transcripts.csv")):
         transcripts_csv_path = os.path.join(step0_dir, "transcripts.csv")
+
+    if not transcripts_csv_path and config.get('use_parquet', False):
+        parquet_path = os.path.join(input_path, "transcripts.parquet")
+        if os.path.exists(parquet_path):
+            transcripts_csv_path = parquet_path
+            print(f"  > Using parquet transcripts: {parquet_path}")
 
     # --- 3. Run Step 1: Dataset Exploration ---
     print("\n" + "-"*40)
@@ -128,7 +169,7 @@ def main():
             step1.run_step1(step1_config)
             print("Step 1 (Exploration) completed successfully.")
         except Exception as e:
-            logger.error(f"Step 1 failed: {e}")
+            logger.error(f"Step 1 failed: {e}", exc_info=True)
             return
 
     step1_adata_path = step1_output_file
@@ -142,6 +183,14 @@ def main():
     os.makedirs(step2_dir, exist_ok=True)
     step2_config = get_config_for_step(config, step2_dir)
     step2_config['previous_step_adata_path'] = step1_adata_path
+
+    # Inject boundary data path for Step 2 spatial overlays
+    nuc_bd_parquet = os.path.join(input_path, "nucleus_boundaries.parquet")
+    nuc_bd_csv_gz = os.path.join(input_path, "nucleus_boundaries.csv.gz")
+    if os.path.exists(nuc_bd_parquet):
+        step2_config['nucleus_boundaries_path'] = nuc_bd_parquet
+    elif os.path.exists(nuc_bd_csv_gz):
+        step2_config['nucleus_boundaries_path'] = nuc_bd_csv_gz
     
     step2_output_file = os.path.join(step2_dir, f"{sample_tag}_step2_points2regions.h5ad")
     
@@ -155,6 +204,21 @@ def main():
             logger.error(f"Step 2 failed: {e}")
             return
 
+
+    # --- 4.5 Auto-download scRNA-seq reference (needed by Steps 4 & 6) ---
+    from utils.reference_downloader import ensure_reference
+
+    # Only attempt download if no manual path is already configured and valid
+    existing_ref = config.get("comparison", {}).get("sc_reference_path")
+    if not existing_ref or not os.path.isfile(existing_ref):
+        ref_path = ensure_reference(config, base_output_root)
+        if ref_path:
+            print(f"  > scRNA-seq reference available: {ref_path}")
+            config.setdefault("comparison", {})["sc_reference_path"] = ref_path
+            config.setdefault("benchmark", {})["reference_adata"] = ref_path
+            config.setdefault("benchmark", {})["sc_reference_path"] = ref_path
+    else:
+        print(f"  > Using manually configured sc_reference_path: {existing_ref}")
 
     # --- 5. Run Step 3: Resegmentation (Cellpose) ---
     # Formerly Step 4
@@ -200,14 +264,16 @@ def main():
             step3_config.setdefault('resegmentation', {}).setdefault('domain_assignment', {})['domain_map_path'] = potential_domain_map
 
         step3.run_step3(step3_config, dapi_path, curr_transcripts, step3_dir)
-        
-        with open(step3_marker, "w") as f:
-            f.write("done")
-            
-        step3_adata_path = step3_output_adata
-        step3_transcripts_path = step3_output_transcripts
-        if os.path.exists(step3_output_masks):
-            step3_mask_path = step3_output_masks
+
+        if os.path.exists(step3_output_adata):
+            with open(step3_marker, "w") as f:
+                f.write("done")
+            step3_adata_path = step3_output_adata
+            step3_transcripts_path = step3_output_transcripts
+            if os.path.exists(step3_output_masks):
+                step3_mask_path = step3_output_masks
+        else:
+            print("  > Step 3 did not produce output (disabled or failed).")
 
     # --- 6. Run Step 4: Comparison & Validation (Metrics) ---
     # Formerly Step 3
@@ -261,9 +327,13 @@ def main():
     else:
         try:
             step5.run_step5(step5_config)
-            with open(step5_marker, "w") as f:
-                f.write("done")
-            print("Step 5 (Optimal Expansion) completed successfully.")
+            step5_csv = os.path.join(step5_dir, f"{sample_tag}_step5_expanded_transcripts.csv")
+            if os.path.exists(step5_csv):
+                with open(step5_marker, "w") as f:
+                    f.write("done")
+                print("Step 5 (Optimal Expansion) completed successfully.")
+            else:
+                print("  > Step 5 did not produce output (disabled or failed).")
         except Exception as e:
             logger.error(f"Step 5 failed: {e}")
 
@@ -279,6 +349,22 @@ def main():
     
     # Inject input_dir for Baysor raw transcript access
     step6_config['input_dir'] = input_path
+
+    # Inject DAPI/morphology image path for Step 6 visualizations
+    # Prefer background.tiff (MIP, created by Step 0) as it's a single-plane TIFF
+    bg_tiff = os.path.join(input_path, "background.tiff")
+    if not os.path.exists(bg_tiff):
+        bg_tiff = os.path.join(input_path, "morphology_mip.ome.tif")
+    if os.path.exists(bg_tiff):
+        step6_config['dapi_image_path'] = bg_tiff
+
+    # Inject nucleus boundary path for boundary overlays
+    nuc_bd_parquet = os.path.join(input_path, "nucleus_boundaries.parquet")
+    nuc_bd_csv_gz = os.path.join(input_path, "nucleus_boundaries.csv.gz")
+    if os.path.exists(nuc_bd_parquet):
+        step6_config['nucleus_boundaries_path'] = nuc_bd_parquet
+    elif os.path.exists(nuc_bd_csv_gz):
+        step6_config['nucleus_boundaries_path'] = nuc_bd_csv_gz
     
     # Inject inputs for benchmark
     # 1. Nuclei (Step 0)
@@ -292,6 +378,13 @@ def main():
     # 3. Prior for Baysor (TIF Mask from Step 3)
     if step3_mask_path:
         step6_config.setdefault('baysor', {})['prior_segmentation_tif'] = step3_mask_path
+
+    # 3b. Mask TIF paths for DAPI mask overlay visualization in Step 6
+    if step3_mask_path and os.path.exists(step3_mask_path):
+        step6_config['cellpose_mask_path'] = step3_mask_path
+    step3_nuclei_mask_path = os.path.join(step3_dir, f"{sample_tag}_step3_nuclei_masks.tif")
+    if os.path.exists(step3_nuclei_mask_path):
+        step6_config['nuclei_mask_path'] = step3_nuclei_mask_path
         
     # 4. Optimal Expansion (Step 5)
     # Step 5 outputs a CSV: {sample_tag}_step5_expanded_transcripts.csv
@@ -306,7 +399,6 @@ def main():
         print("Step 6 output already exists. Skipping...")
     else:
         try:
-            import xenium_step6_segmentation_benchmark as step6
             step6.run_step6(step6_config)
             with open(step6_marker, "w") as f:
                 f.write("done")
@@ -328,9 +420,11 @@ def main():
         print(f"Skipping Step 7: Output marker found at {step7_marker}")
     else:
         try:
-            step7.run_step7(step7_config)
+            optimized_adata_path = step7.run_step7(step7_config, real_adata_path=step0_adata_path)
             with open(step7_marker, "w") as f:
                 f.write("done")
+            if optimized_adata_path:
+                logger.info(f"Step 7 optimized adata: {optimized_adata_path}")
             print("Step 7 (Simulation) completed successfully.")
         except Exception as e:
             logger.error(f"Step 7 failed: {e}")
@@ -338,7 +432,9 @@ def main():
 
     print("\n" + "="*60)
     print("Pipeline Execution Finished")
+    print(f"Full log saved to: {log_path}")
     print("="*60)
+    logger.info("Pipeline execution finished.")
 
 if __name__ == "__main__":
     main()

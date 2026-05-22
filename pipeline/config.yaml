@@ -4,44 +4,73 @@
 # ------------------------------------------------------------
 
 # Input/Output Settings
-input_path: "/Users/iyeonglag/PycharmProjects/masld-xenium/data/Xenium_V1_FFPE_Human_Brain_Alzheimers_With_Addon_outs"
+# Local Mac path (for development):
+# input_path: "/Users/iyeonglag/PycharmProjects/masld-xenium/data/Xenium_V1_FFPE_Human_Brain_Alzheimers_With_Addon_outs"
+input_path: "/data/project/lyrak/masld-xenium/data/Xenium_V1_FFPE_Human_Brain_Alzheimers_With_Addon_outs"
 input_advanced: "xenium-output/cellpose_output/segments_cellpose.tif"  # Example path
 output_dir: "xenium-output"
 sample_tag: "human_alzheimers"
 
 baysor:
   enabled: true
-  executable_path: "/usr/local/bin/baysor" # Path to baysor binary
+  dry_run: false  # Set true to simulate Baysor execution (no actual run)
+  executable_path: "/data/project/lyrak/Anaconda3/envs/masld/bin/baysor" # Path to baysor binary
   params:
-    scale: 50
+    scale: 15
     min_molecules_per_cell: 10
     prior_segmentation_confidence: 0.8 # User requested value
     save_polygons: true
+  crop:
+    enabled: true           # crop mode: run Baysor on densest region only (~5-10h vs 3d+)
+    size_um: 2000           # 2000x2000 µm square
+    coords: null            # null = auto-detect densest region, or [x_min, x_max, y_min, y_max]
+    subset_other_methods: true  # subset nuclei/cellpose/expansion to same crop region for fair comparison
+  tiling:
+    enabled: false          # tiling mode: tile entire tissue and run in parallel (future use)
+    tile_size_um: 2000
+    overlap_um: 200
+    n_workers: 4
 
 # Step 0: Formatting Parameters
 formatting:
   mincounts: 10
   mingenes: 3
+  filter_nuclei_only: false  # If true, keep only transcripts with overlaps_nucleus=1 (matches notebook 0_3)
 
 # Step 1 (New): Exploration Parameters
 exploration:
   # Ref: 1_7 uses radius=100 for structure scores
   neighbor_radius: 100.0
   run_transcript_dispersion: true
+  marker_qc:
+    enabled: false  # Strategy A default: keep Step1 as technical dispersion QC
+    marker_file: "data/markers/brain_localization_markers.tsv"
+    min_genes_per_class: 5
+    min_transcripts_per_gene: 30
+    thresholds_um:
+      nuclear_max: 5.0
+      cyto_max: 10.0
+    pass_rules:
+      nuclear_in_5um_min: 0.70
+      cyto_in_5_10um_min: 0.45
+      tail_gt10um_max: 0.20
+    allowed_classes: ["nuclear", "cytoplasmic", "mitochondrial", "secreted"]
+    qc_classes: ["nuclear", "cytoplasmic"]
   resolutions: [0.5, 0.8, 1.0, 1.5]
   primary_resolution: 1.0
 
 # Step 2 (New): Segmentation Free Analysis (Ref: Points2Regions etc.)
 segmentation_free:
   run_points2regions: true
-  run_ssam: false
-  run_overlaps: true
+  run_ssam: true        # Requires: pip install ssam
+  run_overlaps: true    # Requires: pip install ovrlpy (+ z_location in transcripts)
+  distance_metric: "both"  # "centroid", "boundary", or "both" (paper uses both)
   
   points2regions:
     sigma: 3.0
     n_clusters: [50, 100, 200, 500]
     bin_width: 1.0
-    min_genes_per_bin: 15
+    min_genes_per_bin: 0    # Paper Methods: τ=0 (notebook used 15)
     
   ssam:
     ssam_vf_um_per_px: 2.0
@@ -55,37 +84,81 @@ segmentation_free:
     radius: 50.0
     bw: 1
 
+# scRNA-seq Reference (auto-downloaded if not provided)
+sc_reference:
+  auto_download: true
+  url: "https://sea-ad-single-cell-profiling.s3.us-west-2.amazonaws.com/MTG/RNAseq/Reference_MTG_RNAseq_all-nuclei.2022-06-07.h5ad"
+  dest_dir: "data/scRNAseq"
+  celltype_key: "subclass_label"
+
 # Step 3: Comparison (Metrics) - Now Executed as Step 4
 comparison:
   run_efficiency: true
   run_specificity: true
   run_positivity: true  # New: Moved from Resegmentation
   run_diffusion: true   # New: Moved from Resegmentation
-  
+  technology: "xenium"  # For pixel-to-um conversion: xenium|cosmx|vizgen|merfish|hybriss|resolvedbio
+
+  # Positivity analysis preprocessing (matching notebook 3_5 defaults)
+  positivity:
+    n_neighbors: 8        # Notebook default: 8
+    n_pcs: 0              # Notebook default: 0 (no PCA, use expression directly)
+    leiden_resolution: 2.2 # Notebook default: 2.2 (primary, used for violin/UMAP)
+    leiden_resolutions: [2.2, 1.4, 0.6]  # Notebook 3_5: three resolutions
+    umap_min_dist: 0.1    # Notebook default: 0.1
+    min_counts: 10        # Cell filtering: min transcripts per cell
+    min_genes: 3          # Cell filtering: min genes per cell
+
+  # Efficiency analysis: minimum reads per cell to count as expressing (notebook default: 1)
+  efficiency_minreads: 1
+
   # Optional: Comparison with other datasets
   visium_path: null
   sc_reference_path: null # Path to scRNAseq reference .h5ad for Specificity (NMP) analysis
 
 # Step 4: Resegmentation (Cellpose)
 resegmentation:
-  run_resegmentation: false
-  
+  run_resegmentation: true
+  expansion_distance: 400  # Pixels to expand nuclei masks (notebook default: 400). Set 0 to disable.
+  um_per_pixel_inv: 4.70588  # Pixel-to-µm factor for cell area conversion (Xenium default)
+
   cellpose:
-    use_gpu: false
+    # use_gpu: auto-detected (CUDA > MPS > CPU)
     model_type: 'nuclei'
     diameter: null # Auto-detect if null
     channels: [0, 0] # Grayscale
-    
+
   # Domain Assignment Params (from Notebook 3.2 logic if implemented)
   domain_assignment:
     n_domains: 5
-    domain_map_path: "figures/2.comparison_between_datasets/polygons/regions_multisection_1.json" # Path to domain polygons (JSON)
+    domain_map_path: null  # No domain polygon file; skipping domain assignment
 
 # Step 5: Optimal Expansion
 optimal_expansion:
-  run_expansion: false
+  run_expansion: true
   subsample_fraction: 0.01  # Fraction of assigned cells to use for KDTree speedup (Ref: 4_1 notebook)
   distance_threshold: null  # Optional max distance (null = assigning to nearest regardless of dist)
+  min_reads_per_domain: 5000  # Min transcripts per domain to include in turnover analysis
+  diff_threshold: 0.1  # Correlation diff threshold to detect turnover point
+  p2r_n_clusters: 8        # Meta-cluster P2R k=50 bins into 8 spatial domains (fewer → larger domains → better turnover detection)
+  p2r_max_dist_um: 500.0   # Max distance (µm) for cell-to-bin mapping (~89% coverage with 1030 P2R bins)
+  threshold_mode: "absolute"  # Turnover detection: "absolute" (notebook: diff < 0.1), "crossover" (paper: diff < 0), "relative" (diff < diff_threshold * peak_diff)
+
+# Step 6: Benchmark Preprocessing (matches paper best-practice: scale=true, n_neighbors=16)
+benchmark:
+  preprocessing:
+    target_sum: 100
+    min_counts: 40
+    min_genes: 15
+    n_neighbors: 16  # Paper best-practice: 16 (was 15)
+    n_pcs: 0  # 0 = use all PCs (paper: all principal components)
+    umap_min_dist: 0.1
+    resolution: 1.0
+    scale: true  # Paper best-practice: scaling enabled (was false)
+    hvg: true  # HVG selection before PCA (notebook default: true, params: min_mean=0.3, max_mean=7, min_disp=-0.5)
+  reference_adata: null  # Path to reference .h5ad for annotation transfer
+  ref_celltype_key: "celltype"  # Column in reference adata for cell type labels
+  sc_reference_path: null  # Path to scRNAseq reference .h5ad for NMP metrics (needs layers['raw'] + obs['celltype'])
 
 # Step 7: Simulation & Preprocessing
 simulation:
@@ -99,9 +172,31 @@ simulation:
   noise_percentage: 10.0 # %
   missegmentation_percentage: 10.0 # %
   
+  # Dataset Filtering
+  max_cells: 20000
+  min_celltypes: 2
+  max_celltypes: 30
+
   # Assessment Parameters
   n_permutations: 30 # Number of preprocessing combinations to test
   reference_key: "cell_type" # Column in scRNAseq to use as ground truth
+
+  # Real data validation (Step 7-5): apply best params to actual Xenium data
+  real_validation:
+    enabled: true
+    run_single_param_variants: true
+    cleanup_intermediates: true    # delete simulated h5ad after benchmarking
+    cleanup_reference: false       # keep census reference by default
+
+  # Preprocessing Grid (expanded to ~50 combinations)
+  preprocessing_grid:
+    normalize: [true, false]
+    target_sum: [100, 1000, 10000]
+    scale: [true, false]
+    hvg: [true, false]
+    n_neighbors: [10, 15, 30]
+    n_pcs: [15, 30, 50]
+    resolution: [0.5, 1.0, 1.5]
 
 # Step 2 (Original -> Deferred): Preprocessing Parameters
 preprocessing:
