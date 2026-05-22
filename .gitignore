@@ -44,3 +44,22 @@ docker/.env
 # Reference papers & large docs
 *.pdf
 SSAM_example_*.html
+
+# Slide decks & large binary assets (presentation / draft material)
+*.pptx
+*.ppt
+*.key
+pipeline/documentation/5k/
+pipeline/documentation/pipeline_overview_assets/
+pipeline/documentation/answer/
+
+# Editor / agent local state
+.codex
+.codex/
+.claude/
+
+# Misc binary captures (screenshots etc.)
+*.png
+*.jpg
+*.jpeg
+# Allow PNGs/SVGs explicitly checked into pipeline source (none currently)
